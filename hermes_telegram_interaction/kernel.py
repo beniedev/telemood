@@ -8,19 +8,26 @@ from uuid import uuid4
 
 from .callbacks import CallbackRegistry, CallbackResolution, CallbackStore
 from .contracts import (
+    BubbleRequest,
     CallbackPayload,
     CallbackToken,
     ChoicesRequest,
     CompletionMode,
     DeliveryStatus,
+    IncomingReaction,
+    InteractionCapabilities,
     InteractionHost,
     InteractionKind,
     InteractionReceipt,
     MiniAppRequest,
     ReactionRequest,
+    RichReply,
+    RichReplyReceipt,
     StickerRequest,
+    TargetRef,
     TransportReceipt,
 )
+from .stickers import StickerCatalog
 
 
 class InteractionKernel:
@@ -32,20 +39,38 @@ class InteractionKernel:
         *,
         callbacks: CallbackStore | None = None,
         request_id_factory: Callable[[], str] | None = None,
+        sticker_catalog: StickerCatalog | None = None,
     ) -> None:
         self._host = host
         if callbacks is not None and not isinstance(callbacks, CallbackStore):
             raise TypeError("callbacks must implement CallbackStore")
         self._callbacks = callbacks or CallbackRegistry()
         self._request_id_factory = request_id_factory or (lambda: uuid4().hex)
+        if sticker_catalog is not None and not isinstance(sticker_catalog, StickerCatalog):
+            raise TypeError("sticker_catalog must implement StickerCatalog")
+        self._sticker_catalog = sticker_catalog
 
     def send_reaction(
         self,
         request: ReactionRequest,
         *,
         request_id: str | None = None,
+        capabilities: InteractionCapabilities | None = None,
     ) -> InteractionReceipt:
         request_id = self._resolve_request_id(request_id)
+        if capabilities is not None:
+            if not isinstance(capabilities, InteractionCapabilities):
+                raise TypeError("capabilities must be InteractionCapabilities")
+            if not capabilities.can_send_emoji(request.emoji):
+                return self._receipt(
+                    request_id=request_id,
+                    kind=InteractionKind.REACTION,
+                    transport=TransportReceipt(
+                        DeliveryStatus.FAILED,
+                        detail="reaction_capability_unavailable",
+                    ),
+                    completion_mode=CompletionMode.NONBLOCKING,
+                )
         transport = self._call_single(
             lambda: self._host.send_reaction(request_id, request)
         )
@@ -54,6 +79,23 @@ class InteractionKernel:
             kind=InteractionKind.REACTION,
             transport=transport,
             completion_mode=CompletionMode.NONBLOCKING,
+        )
+
+    def send_bubble(
+        self,
+        request: BubbleRequest,
+        *,
+        request_id: str | None = None,
+    ) -> InteractionReceipt:
+        request_id = self._resolve_request_id(request_id)
+        transport = self._call_single(
+            lambda: self._host.send_bubble(request_id, request)
+        )
+        return self._receipt(
+            request_id=request_id,
+            kind=InteractionKind.BUBBLE,
+            transport=transport,
+            completion_mode=CompletionMode.BLOCKING,
         )
 
     def send_choices(
@@ -75,6 +117,7 @@ class InteractionKernel:
                         value=option.key,
                     ),
                     ttl_seconds=request.callback_ttl_seconds,
+                    **self._thread_kwargs(request.callback_thread_id),
                 )
             transport = self._call_single(
                 lambda: self._host.send_choices(request_id, request, tokens)
@@ -121,6 +164,17 @@ class InteractionKernel:
         request_id: str | None = None,
     ) -> InteractionReceipt:
         request_id = self._resolve_request_id(request_id)
+        send_miniapp = getattr(self._host, "send_miniapp", None)
+        if not callable(send_miniapp):
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.MINIAPP,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail="miniapp_capability_unavailable",
+                ),
+                completion_mode=CompletionMode.BLOCKING,
+            )
         token: CallbackToken | None = None
         try:
             callback_token = self._callbacks.register(
@@ -132,10 +186,11 @@ class InteractionKernel:
                     value=request.app_ref,
                 ),
                 ttl_seconds=request.callback_ttl_seconds,
+                **self._thread_kwargs(request.callback_thread_id),
             )
             token = callback_token
             transport = self._call_single(
-                lambda: self._host.send_miniapp(request_id, request, callback_token)
+                lambda: send_miniapp(request_id, request, callback_token)
             )
         except Exception:
             if token is not None:
@@ -160,8 +215,122 @@ class InteractionKernel:
         *,
         user_id: str,
         chat_id: str,
+        thread_id: str | None = None,
     ) -> CallbackResolution:
-        return self._callbacks.consume(token, user_id=user_id, chat_id=chat_id)
+        try:
+            return self._callbacks.consume(
+                token,
+                user_id=user_id,
+                chat_id=chat_id,
+                **self._thread_kwargs(thread_id),
+            )
+        except TypeError:
+            if thread_id is not None:
+                from .contracts import CallbackRejection
+
+                return CallbackResolution(False, CallbackRejection.THREAD_MISMATCH)
+            return self._callbacks.consume(token, user_id=user_id, chat_id=chat_id)
+
+    def execute_reply(
+        self,
+        reply: RichReply,
+        *,
+        request_id: str | None = None,
+        capabilities: InteractionCapabilities | None = None,
+    ) -> RichReplyReceipt:
+        if not isinstance(reply, RichReply):
+            raise TypeError("reply must be RichReply")
+        root_request_id = self._resolve_request_id(request_id)
+        receipts: list[InteractionReceipt] = []
+        stopped_at: int | None = None
+        for index, action in enumerate(reply.actions):
+            action_request_id = self._derive_request_id(root_request_id, index)
+            if isinstance(action, BubbleRequest):
+                receipt = self.send_bubble(action, request_id=action_request_id)
+            elif isinstance(action, ReactionRequest):
+                receipt = self.send_reaction(
+                    action,
+                    request_id=action_request_id,
+                    capabilities=capabilities,
+                )
+            elif isinstance(action, StickerRequest):
+                receipt = self.send_sticker(action, request_id=action_request_id)
+            elif isinstance(action, ChoicesRequest):
+                receipt = self.send_choices(action, request_id=action_request_id)
+            else:
+                raise TypeError("unsupported rich reply action")
+            receipts.append(receipt)
+            if receipt.status is not DeliveryStatus.VERIFIED:
+                stopped_at = index
+                break
+
+        completed = len(receipts) == reply.total_actions and all(
+            receipt.status is DeliveryStatus.VERIFIED for receipt in receipts
+        )
+        return RichReplyReceipt(
+            request_id=root_request_id,
+            total_actions=reply.total_actions,
+            receipts=tuple(receipts),
+            completed=completed,
+            stopped_at=stopped_at,
+            verified_visible_completion=completed
+            and any(receipt.verified_visible_completion for receipt in receipts),
+        )
+
+    def send_seen_sticker(
+        self,
+        target: TargetRef,
+        bot_namespace: str,
+        file_unique_id: str,
+        *,
+        text_before: str | None = None,
+        text_after: str | None = None,
+        request_id: str | None = None,
+    ) -> InteractionReceipt:
+        request_id = self._resolve_request_id(request_id)
+        if self._sticker_catalog is None:
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.STICKER,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail="sticker_catalog_unavailable",
+                ),
+                completion_mode=CompletionMode.BLOCKING,
+            )
+        sticker = self._sticker_catalog.get(bot_namespace, file_unique_id)
+        if sticker is None:
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.STICKER,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail="sticker_not_seen_in_bot_namespace",
+                ),
+                completion_mode=CompletionMode.BLOCKING,
+            )
+        return self.send_sticker(
+            StickerRequest(
+                target=target,
+                sticker_ref=sticker.file_id,
+                text_before=text_before,
+                text_after=text_after,
+            ),
+            request_id=request_id,
+        )
+
+    @staticmethod
+    def accept_incoming_reaction(
+        reaction: IncomingReaction,
+        capabilities: InteractionCapabilities,
+    ) -> IncomingReaction | None:
+        if not isinstance(reaction, IncomingReaction):
+            raise TypeError("reaction must be IncomingReaction")
+        if not isinstance(capabilities, InteractionCapabilities):
+            raise TypeError("capabilities must be InteractionCapabilities")
+        if not capabilities.can_receive_reactions or not reaction.is_user_event:
+            return None
+        return reaction
 
     @staticmethod
     def _call_single(call: Callable[[], object]) -> TransportReceipt:
@@ -248,6 +417,14 @@ class InteractionKernel:
         ):
             raise ValueError("request_id must be a non-empty trimmed string")
         return value
+
+    @staticmethod
+    def _derive_request_id(root_request_id: str, index: int) -> str:
+        return f"{root_request_id}:{index}"
+
+    @staticmethod
+    def _thread_kwargs(thread_id: str | None) -> dict[str, str]:
+        return {} if thread_id is None else {"thread_id": thread_id}
 
     def _activate_callbacks(
         self,

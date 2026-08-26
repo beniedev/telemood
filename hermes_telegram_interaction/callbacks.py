@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from math import isfinite
+from os import PathLike
 from threading import RLock
-from time import monotonic
+from time import monotonic, time
 from typing import Callable, Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -13,6 +17,7 @@ from .contracts import (
     CallbackPayload,
     CallbackRejection,
     CallbackToken,
+    InteractionKind,
 )
 
 
@@ -47,6 +52,7 @@ class CallbackStore(Protocol):
         chat_id: str,
         payload: CallbackPayload,
         ttl_seconds: float,
+        thread_id: str | None = None,
     ) -> CallbackToken:
         ...
 
@@ -62,6 +68,7 @@ class CallbackStore(Protocol):
         *,
         user_id: str,
         chat_id: str,
+        thread_id: str | None = None,
     ) -> CallbackResolution:
         ...
 
@@ -92,6 +99,7 @@ class _CallbackEntry:
     chat_id: str
     payload: CallbackPayload
     expires_at: float
+    thread_id: str | None = None
     state: str = "pending"
 
 
@@ -124,6 +132,7 @@ class CallbackRegistry:
         chat_id: str,
         payload: CallbackPayload,
         ttl_seconds: float,
+        thread_id: str | None = None,
     ) -> CallbackToken:
         if (
             not isinstance(user_id, str)
@@ -143,6 +152,7 @@ class CallbackRegistry:
             raise ValueError("ttl_seconds must be positive")
         if not isinstance(payload, CallbackPayload):
             raise ValueError("payload must be CallbackPayload")
+        _validate_optional_identity(thread_id, "thread_id")
         with self._lock:
             self._purge_expired_locked()
             if len(self._entries) >= self._max_entries:
@@ -156,6 +166,7 @@ class CallbackRegistry:
                 chat_id=chat_id,
                 payload=payload,
                 expires_at=self._clock() + float(ttl_seconds),
+                thread_id=thread_id,
             )
             return token
 
@@ -183,12 +194,51 @@ class CallbackRegistry:
             entry.state = "revoked"
             return True
 
+    def activate_all(self, tokens: Sequence[CallbackToken]) -> bool:
+        values = tuple(tokens)
+        if not values:
+            return True
+        if not all(isinstance(token, CallbackToken) for token in values):
+            return False
+        with self._lock:
+            entries = [self._entries.get(token.value) for token in values]
+            if any(
+                entry is None
+                or self._expire_if_needed(entry)
+                or entry.state != "pending"
+                for entry in entries
+            ):
+                return False
+            for entry in entries:
+                entry.state = "active"
+            return True
+
+    def revoke_all(self, tokens: Sequence[CallbackToken]) -> bool:
+        values = tuple(tokens)
+        if not values:
+            return True
+        if not all(isinstance(token, CallbackToken) for token in values):
+            return False
+        with self._lock:
+            entries = [self._entries.get(token.value) for token in values]
+            if any(
+                entry is None
+                or self._expire_if_needed(entry)
+                or entry.state in {"revoked", "used"}
+                for entry in entries
+            ):
+                return False
+            for entry in entries:
+                entry.state = "revoked"
+            return True
+
     def consume(
         self,
         token: CallbackToken,
         *,
         user_id: str,
         chat_id: str,
+        thread_id: str | None = None,
     ) -> CallbackResolution:
         if not isinstance(token, CallbackToken):
             return CallbackResolution(False, CallbackRejection.UNKNOWN)
@@ -202,6 +252,8 @@ class CallbackRegistry:
                 return CallbackResolution(False, CallbackRejection.USER_MISMATCH)
             if entry.chat_id != chat_id:
                 return CallbackResolution(False, CallbackRejection.CHAT_MISMATCH)
+            if entry.thread_id != thread_id:
+                return CallbackResolution(False, CallbackRejection.THREAD_MISMATCH)
             if entry.state == "revoked":
                 return CallbackResolution(False, CallbackRejection.REVOKED)
             if entry.state == "used":
@@ -232,3 +284,311 @@ class CallbackRegistry:
             entry.state = "expired"
             return True
         return False
+
+
+def _validate_optional_identity(value: str | None, field_name: str) -> None:
+    if value is not None and (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValueError(f"{field_name} must be non-empty when provided")
+
+
+class SQLiteCallbackStore:
+    """Durable callback store with SQLite transaction-level one-shot claims."""
+
+    def __init__(
+        self,
+        path: str | PathLike[str],
+        *,
+        clock: Callable[[], float] = time,
+        token_factory: Callable[[], str] | None = None,
+        max_entries: int = 1024,
+        timeout: float = 5.0,
+    ) -> None:
+        if path is None or not str(path) or str(path) == ":memory:":
+            raise ValueError("callback store path is required")
+        if max_entries <= 0:
+            raise ValueError("max_entries must be positive")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self._path = str(path)
+        self._clock = clock
+        self._token_factory = token_factory or (lambda: uuid4().hex)
+        self._max_entries = max_entries
+        self._timeout = float(timeout)
+        self._lock = RLock()
+        self._initialize()
+
+    def register(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        payload: CallbackPayload,
+        ttl_seconds: float,
+        thread_id: str | None = None,
+    ) -> CallbackToken:
+        _validate_identity(user_id, "user_id")
+        _validate_identity(chat_id, "chat_id")
+        _validate_optional_identity(thread_id, "thread_id")
+        if not isinstance(payload, CallbackPayload):
+            raise ValueError("payload must be CallbackPayload")
+        if not isinstance(ttl_seconds, (int, float)) or not isfinite(float(ttl_seconds)):
+            raise ValueError("ttl_seconds must be finite")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._purge_expired(connection, now)
+            count = connection.execute("SELECT COUNT(*) FROM callbacks").fetchone()[0]
+            if count >= self._max_entries:
+                connection.rollback()
+                raise ValueError("callback store full")
+            token = CallbackToken(self._token_factory())
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO callbacks (
+                        token, user_id, chat_id, thread_id, kind, request_id,
+                        value, expires_at, state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        token.value,
+                        user_id,
+                        chat_id,
+                        thread_id,
+                        payload.kind.value,
+                        payload.request_id,
+                        payload.value,
+                        now + float(ttl_seconds),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ValueError("callback token collision") from exc
+            return token
+
+    def activate(self, token: CallbackToken) -> bool:
+        if not isinstance(token, CallbackToken):
+            return False
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE callbacks SET state = 'active'
+                WHERE token = ? AND state = 'pending' AND expires_at > ?
+                """,
+                (token.value, now),
+            ).rowcount
+            if changed:
+                return True
+            self._mark_expired(connection, token.value, now)
+            return False
+
+    def activate_all(self, tokens: Sequence[CallbackToken]) -> bool:
+        values = tuple(tokens)
+        if not values:
+            return True
+        if not all(isinstance(token, CallbackToken) for token in values):
+            return False
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = [
+                connection.execute(
+                    "SELECT state, expires_at FROM callbacks WHERE token = ?",
+                    (token.value,),
+                ).fetchone()
+                for token in values
+            ]
+            if any(
+                row is None or row[0] != "pending" or float(row[1]) <= now
+                for row in rows
+            ):
+                for token, row in zip(values, rows):
+                    if row is not None and float(row[1]) <= now:
+                        self._mark_expired(connection, token.value, now)
+                return False
+            connection.executemany(
+                "UPDATE callbacks SET state = 'active' WHERE token = ?",
+                ((token.value,) for token in values),
+            )
+            return True
+
+    def revoke(self, token: CallbackToken) -> bool:
+        if not isinstance(token, CallbackToken):
+            return False
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE callbacks SET state = 'revoked'
+                WHERE token = ? AND state IN ('pending', 'active') AND expires_at > ?
+                """,
+                (token.value, now),
+            ).rowcount
+            if changed:
+                return True
+            self._mark_expired(connection, token.value, now)
+            return False
+
+    def revoke_all(self, tokens: Sequence[CallbackToken]) -> bool:
+        values = tuple(tokens)
+        if not values:
+            return True
+        if not all(isinstance(token, CallbackToken) for token in values):
+            return False
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = [
+                connection.execute(
+                    "SELECT state, expires_at FROM callbacks WHERE token = ?",
+                    (token.value,),
+                ).fetchone()
+                for token in values
+            ]
+            if any(
+                row is None
+                or row[0] not in {"pending", "active"}
+                or float(row[1]) <= now
+                for row in rows
+            ):
+                for token, row in zip(values, rows):
+                    if row is not None and float(row[1]) <= now:
+                        self._mark_expired(connection, token.value, now)
+                return False
+            connection.executemany(
+                "UPDATE callbacks SET state = 'revoked' WHERE token = ?",
+                ((token.value,) for token in values),
+            )
+            return True
+
+    def consume(
+        self,
+        token: CallbackToken,
+        *,
+        user_id: str,
+        chat_id: str,
+        thread_id: str | None = None,
+    ) -> CallbackResolution:
+        if not isinstance(token, CallbackToken):
+            return CallbackResolution(False, CallbackRejection.UNKNOWN)
+        _validate_identity(user_id, "user_id")
+        _validate_identity(chat_id, "chat_id")
+        _validate_optional_identity(thread_id, "thread_id")
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT user_id, chat_id, thread_id, kind, request_id, value,
+                       expires_at, state
+                FROM callbacks WHERE token = ?
+                """,
+                (token.value,),
+            ).fetchone()
+            if row is None:
+                return CallbackResolution(False, CallbackRejection.UNKNOWN)
+            if float(row[6]) <= now:
+                self._mark_expired(connection, token.value, now)
+                return CallbackResolution(False, CallbackRejection.EXPIRED)
+            if row[0] != user_id:
+                return CallbackResolution(False, CallbackRejection.USER_MISMATCH)
+            if row[1] != chat_id:
+                return CallbackResolution(False, CallbackRejection.CHAT_MISMATCH)
+            if row[2] != thread_id:
+                return CallbackResolution(False, CallbackRejection.THREAD_MISMATCH)
+            if row[7] == "revoked":
+                return CallbackResolution(False, CallbackRejection.REVOKED)
+            if row[7] == "used":
+                return CallbackResolution(False, CallbackRejection.REPLAY)
+            if row[7] != "active":
+                return CallbackResolution(False, CallbackRejection.PENDING)
+            changed = connection.execute(
+                "UPDATE callbacks SET state = 'used' WHERE token = ? AND state = 'active'",
+                (token.value,),
+            ).rowcount
+            if changed != 1:
+                return CallbackResolution(False, CallbackRejection.REPLAY)
+            return CallbackResolution(
+                True,
+                payload=CallbackPayload(
+                    kind=InteractionKind(row[3]),
+                    request_id=row[4],
+                    value=row[5],
+                ),
+            )
+
+    def purge_expired(self) -> int:
+        now = self._clock()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._purge_expired(connection, now)
+
+    def _initialize(self) -> None:
+        with self._lock, self._connection() as connection:
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._path, timeout=self._timeout)
+        connection.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS callbacks (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                thread_id TEXT,
+                kind TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                value TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                state TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+        return connection
+
+    @contextmanager
+    def _connection(self):
+        connection = self._connect()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _purge_expired(connection: sqlite3.Connection, now: float) -> int:
+        return connection.execute(
+            "DELETE FROM callbacks WHERE expires_at <= ?", (now,)
+        ).rowcount
+
+    @staticmethod
+    def _mark_expired(connection: sqlite3.Connection, token: str, now: float) -> None:
+        connection.execute(
+            "UPDATE callbacks SET state = 'expired' WHERE token = ? AND expires_at <= ?",
+            (token, now),
+        )
+
+
+def _validate_identity(value: str, field_name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValueError(f"{field_name} must be non-empty")

@@ -94,13 +94,13 @@ class PublicContractTests(unittest.TestCase):
         consume = inspect.signature(CallbackStore.consume)
         self.assertEqual(
             tuple(register.parameters),
-            ("self", "user_id", "chat_id", "payload", "ttl_seconds"),
+            ("self", "user_id", "chat_id", "payload", "ttl_seconds", "thread_id"),
         )
         self.assertEqual(tuple(activate.parameters), ("self", "token"))
         self.assertEqual(tuple(revoke.parameters), ("self", "token"))
         self.assertEqual(
             tuple(consume.parameters),
-            ("self", "token", "user_id", "chat_id"),
+            ("self", "token", "user_id", "chat_id", "thread_id"),
         )
 
     def test_registry_round_trip_uses_public_types(self) -> None:

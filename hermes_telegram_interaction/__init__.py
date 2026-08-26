@@ -1,7 +1,13 @@
 """Public, topology-neutral interaction contracts and kernel."""
 
-from .callbacks import CallbackRegistry, CallbackResolution, CallbackStore
+from .callbacks import (
+    CallbackRegistry,
+    CallbackResolution,
+    CallbackStore,
+    SQLiteCallbackStore,
+)
 from .contracts import (
+    BubbleRequest,
     CallbackPayload,
     CallbackRejection,
     CallbackToken,
@@ -9,11 +15,19 @@ from .contracts import (
     ChoicesRequest,
     CompletionMode,
     DeliveryStatus,
+    IncomingReaction,
+    IncomingSticker,
+    InteractionCapabilities,
     InteractionHost,
     InteractionKind,
     InteractionReceipt,
+    MiniAppHost,
     MiniAppRequest,
     ReactionRequest,
+    RegularSticker,
+    RichReply,
+    RichReplyReceipt,
+    StickerFormat,
     StickerPart,
     StickerPartKind,
     StickerRequest,
@@ -21,10 +35,13 @@ from .contracts import (
     TransportReceipt,
 )
 from .kernel import InteractionKernel
+from .stickers import SQLiteStickerCatalog, StickerCatalog
+from .text import split_semantic_bubbles
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "BubbleRequest",
     "CallbackPayload",
     "CallbackRegistry",
     "CallbackRejection",
@@ -35,15 +52,27 @@ __all__ = [
     "ChoicesRequest",
     "CompletionMode",
     "DeliveryStatus",
+    "IncomingReaction",
+    "IncomingSticker",
+    "InteractionCapabilities",
     "InteractionHost",
     "InteractionKernel",
     "InteractionKind",
     "InteractionReceipt",
+    "MiniAppHost",
     "MiniAppRequest",
     "ReactionRequest",
+    "RegularSticker",
+    "RichReply",
+    "RichReplyReceipt",
+    "SQLiteCallbackStore",
+    "SQLiteStickerCatalog",
+    "StickerCatalog",
+    "StickerFormat",
     "StickerPart",
     "StickerPartKind",
     "StickerRequest",
     "TargetRef",
     "TransportReceipt",
+    "split_semantic_bubbles",
 ]
