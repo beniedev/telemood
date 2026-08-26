@@ -6,6 +6,7 @@ from .callbacks import (
     CallbackStore,
     SQLiteCallbackStore,
 )
+from .conformance import AdapterCheckResult, MethodCheck, check_adapter
 from .contracts import (
     BubbleRequest,
     CallbackPayload,
@@ -35,12 +36,15 @@ from .contracts import (
     TransportReceipt,
 )
 from .kernel import InteractionKernel
+from .plans import ActionPlanError, action_plan_to_reply
 from .stickers import SQLiteStickerCatalog, StickerCatalog
 from .text import split_semantic_bubbles
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "ActionPlanError",
+    "AdapterCheckResult",
     "BubbleRequest",
     "CallbackPayload",
     "CallbackRegistry",
@@ -61,6 +65,7 @@ __all__ = [
     "InteractionReceipt",
     "MiniAppHost",
     "MiniAppRequest",
+    "MethodCheck",
     "ReactionRequest",
     "RegularSticker",
     "RichReply",
@@ -74,5 +79,7 @@ __all__ = [
     "StickerRequest",
     "TargetRef",
     "TransportReceipt",
+    "action_plan_to_reply",
+    "check_adapter",
     "split_semantic_bubbles",
 ]
