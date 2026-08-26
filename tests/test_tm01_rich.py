@@ -7,7 +7,7 @@ import unittest
 from itertools import count
 from pathlib import Path
 
-from hermes_telegram_interaction import (
+from telemood import (
     BubbleRequest,
     CallbackPayload,
     CallbackRejection,
@@ -15,14 +15,18 @@ from hermes_telegram_interaction import (
     ChoiceOption,
     ChoicesRequest,
     DeliveryStatus,
-    IncomingReaction,
+    IncomingReactionChange,
     IncomingSticker,
     InteractionCapabilities,
     InteractionKind,
     InteractionKernel,
     InteractionReceipt,
     MiniAppRequest,
+    ReactionActor,
+    ReactionRejection,
     ReactionRequest,
+    ReactionType,
+    ReactionValue,
     RegularSticker,
     RichReply,
     SQLiteCallbackStore,
@@ -108,7 +112,12 @@ class RichInteractionTests(unittest.TestCase):
         )
         host.reaction_result = TransportReceipt(DeliveryStatus.UNCERTAIN)
 
-        stopped = kernel.execute_reply(reply, request_id="reply")
+        reaction_capabilities = InteractionCapabilities(can_send_reactions=True)
+        stopped = kernel.execute_reply(
+            reply,
+            request_id="reply",
+            capabilities=reaction_capabilities,
+        )
 
         self.assertFalse(stopped.completed)
         self.assertEqual(stopped.stopped_at, 1)
@@ -119,7 +128,11 @@ class RichInteractionTests(unittest.TestCase):
         )
 
         host.reaction_result = TransportReceipt(DeliveryStatus.VERIFIED, "reaction")
-        completed = kernel.execute_reply(reply, request_id="reply")
+        completed = kernel.execute_reply(
+            reply,
+            request_id="reply",
+            capabilities=reaction_capabilities,
+        )
         self.assertTrue(completed.completed)
         self.assertIsNone(completed.stopped_at)
         self.assertEqual(
@@ -181,28 +194,54 @@ class RichInteractionTests(unittest.TestCase):
         unavailable = kernel.send_reaction(
             ReactionRequest(target(), "👀"),
             request_id="reaction-not-allowed",
-            capabilities=InteractionCapabilities(available_reactions=("👍",)),
+            capabilities=InteractionCapabilities(
+                can_send_reactions=True,
+                available_reactions=("👍",),
+            ),
         )
         self.assertEqual(unavailable.status, DeliveryStatus.FAILED)
         allowed = kernel.send_reaction(
             ReactionRequest(target(), "👍"),
             request_id="reaction-allowed",
-            capabilities=InteractionCapabilities(available_reactions=("👍",)),
+            capabilities=InteractionCapabilities(
+                can_send_reactions=True,
+                available_reactions=("👍",),
+            ),
         )
         self.assertEqual(allowed.status, DeliveryStatus.VERIFIED)
         self.assertEqual(host.events, [("reaction", "reaction-allowed")])
 
-        capabilities = InteractionCapabilities(can_receive_reactions=True)
-        user_event = IncomingReaction(target(), "👍", "user")
-        self.assertIs(kernel.accept_incoming_reaction(user_event, capabilities), user_event)
-        self.assertIsNone(
-            kernel.accept_incoming_reaction(
-                IncomingReaction(target(), "👍", "user", bot_generated=True),
-                capabilities,
-            )
+        capabilities = InteractionCapabilities(
+            can_receive_reaction_changes=True,
+            reaction_updates_subscribed=True,
         )
-        self.assertIsNone(
-            kernel.accept_incoming_reaction(IncomingReaction.unavailable("not subscribed"), capabilities)
+        user_event = IncomingReactionChange(
+            target(),
+            ReactionActor(user_id="user"),
+            (),
+            (ReactionValue(ReactionType.EMOJI, "👍"),),
+            100,
+        )
+        accepted = kernel.accept_incoming_reaction(user_event, capabilities)
+        self.assertTrue(accepted.accepted)
+        self.assertIs(accepted.event, user_event)
+
+        bot_event = IncomingReactionChange(
+            target(),
+            ReactionActor(user_id="bot"),
+            (),
+            (ReactionValue(ReactionType.EMOJI, "👍"),),
+            101,
+            bot_generated=True,
+        )
+        self.assertEqual(
+            kernel.accept_incoming_reaction(bot_event, capabilities).reason,
+            ReactionRejection.BOT_GENERATED,
+        )
+        not_subscribed = InteractionCapabilities(can_receive_reaction_changes=True)
+        self.assertEqual(
+            kernel.accept_incoming_reaction(user_event, not_subscribed).reason,
+            ReactionRejection.UPDATES_NOT_SUBSCRIBED,
         )
 
         host.send_miniapp = None

@@ -77,6 +77,13 @@ class CallbackRejection(str, Enum):
     THREAD_MISMATCH = "thread_mismatch"
 
 
+class ReactionRejection(str, Enum):
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    UPDATES_NOT_SUBSCRIBED = "updates_not_subscribed"
+    BOT_GENERATED = "bot_generated"
+    UNSUPPORTED_REACTION_TYPE = "unsupported_reaction_type"
+
+
 @dataclass(frozen=True)
 class TargetRef:
     """Opaque host target; it contains identifiers, never an endpoint."""
@@ -126,15 +133,22 @@ class BubbleRequest:
 class InteractionCapabilities:
     """Capabilities reported by a host adapter, without provider types."""
 
-    can_send_reactions: bool = True
-    can_receive_reactions: bool = False
+    can_send_reactions: bool = False
+    can_receive_reaction_changes: bool = False
+    can_receive_reaction_counts: bool = False
+    reaction_updates_subscribed: bool = False
     available_reactions: tuple[str, ...] | None = None
+    reaction_unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.can_send_reactions, bool):
-            raise ValueError("can_send_reactions must be bool")
-        if not isinstance(self.can_receive_reactions, bool):
-            raise ValueError("can_receive_reactions must be bool")
+        for field_name in (
+            "can_send_reactions",
+            "can_receive_reaction_changes",
+            "can_receive_reaction_counts",
+            "reaction_updates_subscribed",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be bool")
         if self.available_reactions is not None:
             values = tuple(self.available_reactions)
             if not all(isinstance(value, str) and value for value in values):
@@ -142,10 +156,13 @@ class InteractionCapabilities:
             if len(set(values)) != len(values):
                 raise ValueError("available_reactions must be unique")
             object.__setattr__(self, "available_reactions", values)
+        _optional_text(self.reaction_unavailable_reason, "reaction_unavailable_reason")
 
     @property
     def inbound_reactions_available(self) -> bool:
-        return self.can_receive_reactions
+        return self.reaction_updates_subscribed and (
+            self.can_receive_reaction_changes or self.can_receive_reaction_counts
+        )
 
     def can_send_emoji(self, emoji: str) -> bool:
         if not self.can_send_reactions:
@@ -153,37 +170,137 @@ class InteractionCapabilities:
         return self.available_reactions is None or emoji in self.available_reactions
 
 
-@dataclass(frozen=True)
-class IncomingReaction:
-    """Normalized reaction input; unavailable and bot-generated states are explicit."""
+class ReactionType(str, Enum):
+    EMOJI = "emoji"
+    CUSTOM_EMOJI = "custom_emoji"
+    PAID = "paid"
 
-    target: TargetRef | None
-    emoji: str | None
-    user_id: str | None
-    bot_generated: bool = False
-    available: bool = True
-    detail: str | None = None
+
+@dataclass(frozen=True)
+class ReactionValue:
+    """Provider-neutral Telegram reaction value."""
+
+    type: ReactionType
+    value: str | None = None
 
     def __post_init__(self) -> None:
-        if self.available:
-            if self.target is None or self.emoji is None or self.user_id is None:
-                raise ValueError("available reaction requires target, emoji, and user_id")
-            _required_text(self.emoji, "reaction emoji")
-            _required_text(self.user_id, "reaction user_id")
+        try:
+            reaction_type = ReactionType(self.type)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid reaction type") from exc
+        object.__setattr__(self, "type", reaction_type)
+        if reaction_type is ReactionType.PAID:
+            if self.value is not None:
+                raise ValueError("paid reaction must not contain a value")
         else:
-            if self.emoji is not None or self.user_id is not None:
-                raise ValueError("unavailable reaction cannot contain user event data")
-        if not isinstance(self.bot_generated, bool) or not isinstance(self.available, bool):
-            raise ValueError("reaction state flags must be bool")
-        _optional_text(self.detail, "reaction detail")
+            _required_text(self.value, "reaction value")
 
-    @classmethod
-    def unavailable(cls, detail: str | None = None) -> "IncomingReaction":
-        return cls(target=None, emoji=None, user_id=None, available=False, detail=detail)
 
-    @property
-    def is_user_event(self) -> bool:
-        return self.available and not self.bot_generated
+@dataclass(frozen=True)
+class ReactionActor:
+    """Exactly one concrete user or anonymous actor chat."""
+
+    user_id: str | None = None
+    chat_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.user_id is None) == (self.chat_id is None):
+            raise ValueError("reaction actor requires exactly one user_id or chat_id")
+        _optional_text(self.user_id, "reaction actor user_id")
+        _optional_text(self.chat_id, "reaction actor chat_id")
+
+
+@dataclass(frozen=True)
+class IncomingReactionChange:
+    """A Telegram reaction change with actor and old/new sets preserved."""
+
+    target: TargetRef
+    actor: ReactionActor
+    old_reactions: tuple[ReactionValue, ...]
+    new_reactions: tuple[ReactionValue, ...]
+    changed_at: int
+    bot_generated: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, TargetRef) or self.target.message_id is None:
+            raise ValueError("reaction change target must include message_id")
+        if not isinstance(self.actor, ReactionActor):
+            raise ValueError("reaction change actor must be ReactionActor")
+        old_reactions = tuple(self.old_reactions)
+        new_reactions = tuple(self.new_reactions)
+        if not all(isinstance(value, ReactionValue) for value in old_reactions + new_reactions):
+            raise ValueError("reaction sets must contain ReactionValue values")
+        if not isinstance(self.changed_at, int) or isinstance(self.changed_at, bool) or self.changed_at < 0:
+            raise ValueError("changed_at must be a non-negative integer timestamp")
+        if not isinstance(self.bot_generated, bool):
+            raise ValueError("bot_generated must be bool")
+        object.__setattr__(self, "old_reactions", old_reactions)
+        object.__setattr__(self, "new_reactions", new_reactions)
+
+
+@dataclass(frozen=True)
+class ReactionCount:
+    """One aggregate reaction count without a user actor."""
+
+    reaction: ReactionValue
+    total_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reaction, ReactionValue):
+            raise ValueError("reaction must be ReactionValue")
+        if not isinstance(self.total_count, int) or isinstance(self.total_count, bool) or self.total_count < 0:
+            raise ValueError("total_count must be a non-negative integer")
+
+
+@dataclass(frozen=True)
+class IncomingReactionCount:
+    """An anonymous aggregate update, which Telegram may deliver with delay."""
+
+    target: TargetRef
+    counts: tuple[ReactionCount, ...]
+    changed_at: int
+    delayed: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, TargetRef) or self.target.message_id is None:
+            raise ValueError("reaction count target must include message_id")
+        counts = tuple(self.counts)
+        if not all(isinstance(value, ReactionCount) for value in counts):
+            raise ValueError("counts must contain ReactionCount values")
+        if not isinstance(self.changed_at, int) or isinstance(self.changed_at, bool) or self.changed_at < 0:
+            raise ValueError("changed_at must be a non-negative integer timestamp")
+        if not isinstance(self.delayed, bool):
+            raise ValueError("delayed must be bool")
+        object.__setattr__(self, "counts", counts)
+
+
+ReactionEvent = IncomingReactionChange | IncomingReactionCount
+
+
+@dataclass(frozen=True)
+class ReactionAcceptance:
+    """Explicit normalization result for supported or rejected inbound updates."""
+
+    accepted: bool
+    event: ReactionEvent | None = None
+    reason: ReactionRejection | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.accepted, bool):
+            raise ValueError("accepted must be bool")
+        if self.accepted:
+            if not isinstance(self.event, (IncomingReactionChange, IncomingReactionCount)):
+                raise ValueError("accepted reaction must contain an event")
+            if self.reason is not None:
+                raise ValueError("accepted reaction cannot contain a rejection reason")
+        else:
+            if self.event is not None:
+                raise ValueError("rejected reaction cannot contain an event")
+            try:
+                reason = ReactionRejection(self.reason)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rejected reaction requires a valid reason") from exc
+            object.__setattr__(self, "reason", reason)
 
 
 @dataclass(frozen=True)
@@ -245,6 +362,12 @@ class StickerFormat(str, Enum):
     VIDEO = "video"
 
 
+class StickerType(str, Enum):
+    REGULAR = "regular"
+    MASK = "mask"
+    CUSTOM_EMOJI = "custom_emoji"
+
+
 @dataclass(frozen=True)
 class RegularSticker:
     """Bot-scoped regular sticker metadata, independent of a Telegram SDK."""
@@ -252,16 +375,27 @@ class RegularSticker:
     bot_namespace: str
     file_id: str
     file_unique_id: str
+    catalog_id: str | None = None
     emoji: str | None = None
     set_name: str | None = None
     format: StickerFormat = StickerFormat.STATIC
     thumbnail_ref: str | None = None
     media_ref: str | None = None
+    type: StickerType = StickerType.REGULAR
 
     def __post_init__(self) -> None:
         _required_text(self.bot_namespace, "bot_namespace")
         _logical_ref(self.file_id, "file_id")
         _logical_ref(self.file_unique_id, "file_unique_id")
+        if self.catalog_id is not None:
+            _logical_ref(self.catalog_id, "catalog_id")
+        try:
+            sticker_type = StickerType(self.type)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid sticker type") from exc
+        if sticker_type is not StickerType.REGULAR:
+            raise ValueError("only regular stickers can be stored for v0.1")
+        object.__setattr__(self, "type", sticker_type)
         try:
             sticker_format = StickerFormat(self.format)
         except (TypeError, ValueError) as exc:
@@ -277,11 +411,12 @@ class RegularSticker:
 
 @dataclass(frozen=True)
 class IncomingSticker:
-    """A normalized regular sticker update supplied by a host adapter."""
+    """Normalized Telegram sticker metadata supplied by a host adapter."""
 
     bot_namespace: str
     file_id: str
     file_unique_id: str
+    type: StickerType = StickerType.REGULAR
     emoji: str | None = None
     set_name: str | None = None
     format: StickerFormat = StickerFormat.STATIC
@@ -289,29 +424,26 @@ class IncomingSticker:
     media_ref: str | None = None
 
     def __post_init__(self) -> None:
-        regular = RegularSticker(
-            bot_namespace=self.bot_namespace,
-            file_id=self.file_id,
-            file_unique_id=self.file_unique_id,
-            emoji=self.emoji,
-            set_name=self.set_name,
-            format=self.format,
-            thumbnail_ref=self.thumbnail_ref,
-            media_ref=self.media_ref,
-        )
-        for field in (
-            "bot_namespace",
-            "file_id",
-            "file_unique_id",
-            "emoji",
-            "set_name",
-            "format",
-            "thumbnail_ref",
-            "media_ref",
-        ):
-            object.__setattr__(self, field, getattr(regular, field))
+        _required_text(self.bot_namespace, "bot_namespace")
+        _logical_ref(self.file_id, "file_id")
+        _logical_ref(self.file_unique_id, "file_unique_id")
+        try:
+            sticker_type = StickerType(self.type)
+            sticker_format = StickerFormat(self.format)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid sticker type or format") from exc
+        object.__setattr__(self, "type", sticker_type)
+        object.__setattr__(self, "format", sticker_format)
+        _optional_text(self.emoji, "sticker emoji")
+        _optional_text(self.set_name, "sticker set_name")
+        if self.thumbnail_ref is not None:
+            _logical_ref(self.thumbnail_ref, "thumbnail_ref")
+        if self.media_ref is not None:
+            _logical_ref(self.media_ref, "media_ref")
 
     def as_regular(self) -> RegularSticker:
+        if self.type is not StickerType.REGULAR:
+            raise ValueError("only regular stickers can be stored for v0.1")
         return RegularSticker(
             bot_namespace=self.bot_namespace,
             file_id=self.file_id,
@@ -321,7 +453,49 @@ class IncomingSticker:
             format=self.format,
             thumbnail_ref=self.thumbnail_ref,
             media_ref=self.media_ref,
+            type=self.type,
         )
+
+
+@dataclass(frozen=True)
+class IncomingStickerEvent:
+    """Inbound sticker plus trusted message, sender, and time context."""
+
+    target: TargetRef
+    sticker: IncomingSticker
+    received_at: int
+    sender_user_id: str | None = None
+    sender_chat_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, TargetRef) or self.target.message_id is None:
+            raise ValueError("incoming sticker target must include message_id")
+        if not isinstance(self.sticker, IncomingSticker):
+            raise ValueError("sticker must be IncomingSticker")
+        if not isinstance(self.received_at, int) or isinstance(self.received_at, bool) or self.received_at < 0:
+            raise ValueError("received_at must be a non-negative integer timestamp")
+        if (self.sender_user_id is None) == (self.sender_chat_id is None):
+            raise ValueError("incoming sticker requires exactly one sender identity")
+        _optional_text(self.sender_user_id, "sender_user_id")
+        _optional_text(self.sender_chat_id, "sender_chat_id")
+
+
+@dataclass(frozen=True)
+class StickerModelView:
+    """Safe model-facing sticker view; reusable Telegram file ids are omitted."""
+
+    catalog_id: str
+    text: str
+    thumbnail_ref: str | None = None
+    media_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        _logical_ref(self.catalog_id, "catalog_id")
+        _required_text(self.text, "sticker model text")
+        if self.thumbnail_ref is not None:
+            _logical_ref(self.thumbnail_ref, "thumbnail_ref")
+        if self.media_ref is not None:
+            _logical_ref(self.media_ref, "media_ref")
 
 
 @dataclass(frozen=True)
@@ -425,6 +599,8 @@ class CallbackToken:
 
     def __post_init__(self) -> None:
         _required_text(self.value, "callback token")
+        if len(self.value.encode("utf-8")) > 64:
+            raise ValueError("callback token exceeds Telegram's 64-byte limit")
 
 
 @dataclass(frozen=True)
@@ -471,7 +647,8 @@ class InteractionReceipt:
     provider_delivery_id: str | None = None
     callback_tokens: tuple[CallbackToken, ...] = ()
     detail: str | None = None
-    part_statuses: tuple[DeliveryStatus, ...] = ()
+    part_receipts: tuple[TransportReceipt, ...] = ()
+    total_parts: int = 0
 
     def __post_init__(self) -> None:
         _required_text(self.request_id, "request_id")
@@ -485,8 +662,14 @@ class InteractionReceipt:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "completion_mode", completion_mode)
         object.__setattr__(self, "callback_tokens", tuple(self.callback_tokens))
-        part_statuses = tuple(DeliveryStatus(value) for value in self.part_statuses)
-        object.__setattr__(self, "part_statuses", part_statuses)
+        part_receipts = tuple(self.part_receipts)
+        if not all(isinstance(value, TransportReceipt) for value in part_receipts):
+            raise ValueError("part_receipts must contain TransportReceipt values")
+        if not isinstance(self.total_parts, int) or isinstance(self.total_parts, bool) or self.total_parts < 0:
+            raise ValueError("total_parts must be a non-negative integer")
+        if len(part_receipts) > self.total_parts:
+            raise ValueError("part receipt count cannot exceed total_parts")
+        object.__setattr__(self, "part_receipts", part_receipts)
         _optional_text(self.provider_delivery_id, "provider_delivery_id")
         _optional_text(self.detail, "detail")
 
@@ -498,6 +681,14 @@ class InteractionReceipt:
             raise ValueError("only blocking interactions can complete a visible turn")
         if status is not DeliveryStatus.VERIFIED and self.callback_tokens:
             raise ValueError("unverified transport cannot return active callback tokens")
+
+    @property
+    def part_statuses(self) -> tuple[DeliveryStatus, ...]:
+        return tuple(receipt.status for receipt in self.part_receipts)
+
+    @property
+    def unexecuted_parts(self) -> int:
+        return self.total_parts - len(self.part_receipts)
 
 
 @dataclass(frozen=True)
@@ -551,10 +742,11 @@ class RichReplyReceipt:
 
 @runtime_checkable
 class InteractionHost(Protocol):
-    """Injected host adapter protocol with a caller-stable idempotency key.
+    """Injected host adapter protocol with a caller-stable correlation id.
 
     ``request_id`` must be forwarded by the host to its transport operation;
-    this protocol does not create a second queue or delivery ledger.
+    Telegram does not treat it as a universal idempotency key, and this
+    protocol does not create a second queue or delivery ledger.
     """
 
     def send_reaction(
@@ -585,6 +777,7 @@ class InteractionHost(Protocol):
         request: StickerRequest,
         parts: Sequence[StickerPart],
     ) -> Sequence[TransportReceipt]:
+        """Send in order, stop on non-verified, and return attempted receipts."""
         ...
 
 @runtime_checkable

@@ -1,375 +1,192 @@
-# Telemood Integration & Setup Guide
+# Telemood setup guide
 
-This document is authoritative for humans and coding Agents integrating
-`hermes_telegram_interaction` into an existing Telegram host agent.
+[简体中文](SETUP.zh-CN.md)
 
-Repository: `https://github.com/beniedev/telemood`
+This guide is for an agent integrating Telemood into an existing Telegram bot host. The host remains the sole owner of its token, client, polling/webhook loop, thread routing, and reconnect lifecycle.
 
-## 0) Authorization Boundary (Required)
+## 1. Before changing the host
 
-- Do read-only inspection, static checks, and offline synthetic tests first.
-- The host remains the sole owner of its configured bot token. Telemood/adapter integration must only reuse the existing host Telegram transport/client and must not request, read, copy, or persist the token or any raw SDK handle.
-- Host code/config mutation, live Telegram calls, process restarts, and deploy/restart actions require explicit human authorization.
-- Before any live run, produce and share an explicit capability-gap report.
+Inspect the host read-only and confirm:
 
-## 1) Preconditions
+- existing send methods and their provider results;
+- incoming message, sticker, reaction, and callback routes;
+- reaction update subscriptions and required bot permissions;
+- host-owned paths for callback and sticker SQLite state.
 
-- Python requirement: `>=3.11`
-- Distribution/package: `hermes-telegram-interaction` (`import hermes_telegram_interaction`)
-- Runtime dependencies: `dependencies = []` means no runtime package dependencies; it does not remove normal Python build/tooling needs.
-- No Hermes dependency and no direct transport ownership by this package.
-- No custom sticker creation or custom sticker-set publishing in this release.
+Do not read or copy the bot token. Do not create a second client or update loop.
 
-Minimal install step in a cloned checkout (after authorization):
+Current pre-release metadata:
 
-```bash
-python -m pip install .
-```
+    distribution: telemood
+    import: telemood
+    Python: >=3.11
+    runtime dependencies: none
 
-## 2) Host Inspection (Read-only)
+## 2. Model plan
 
-Before wiring:
+The model returns JSON-compatible data only. It cannot choose a chat, user, thread, bot namespace, Telegram file_id, token, endpoint, or SDK object.
 
-1. Confirm host owns Telegram client, token, SDK, and transport lifecycle.
-2. Locate inbound message/callback/reaction/sticker paths.
-3. Confirm a synchronous adapter boundary from host logic.
-4. Choose host-owned state paths (for example `state/callbacks.sqlite3` and `state/stickers.sqlite3`).
+    {
+      "version": "telemood.plan.v1",
+      "actions": [
+        {"type": "bubble", "text": "I am checking that now."},
+        {"type": "reaction", "target": "trigger_message", "emoji": "👀"},
+        {
+          "type": "sticker",
+          "sticker": {"kind": "catalog", "id": "sticker_opaque_logical_id"}
+        },
+        {
+          "type": "choices",
+          "prompt": "Continue?",
+          "options": [
+            {"key": "yes", "label": "Yes"},
+            {"key": "no", "label": "No"}
+          ]
+        }
+      ]
+    }
 
-## 3) Action Source Trust Boundary
+Parse first, then bind trusted host context:
 
-`action_plan_to_reply` accepts either:
+    from telemood import (
+        PlanContext,
+        bind_interaction_plan,
+        parse_interaction_plan,
+    )
 
-- `{"actions": [...]}` or
-- `[...]`
+    typed_plan = parse_interaction_plan(model_output)
+    reply = bind_interaction_plan(
+        typed_plan,
+        PlanContext(
+            target=trusted_target,
+            authorized_user_id=trusted_user_id,
+            bot_namespace=trusted_bot_namespace,
+        ),
+        sticker_catalog=sticker_catalog,
+    )
 
-Only trusted host code injects:
+Binding automatically expands long bubble text with a conservative heuristic: paragraph, sentence, whitespace, then hard split. Expanded bubbles stay in their original position relative to reactions, stickers, and choices.
 
-- `target`
-- `authorized_user_id`
-- any target endpoint/client fields
+Unknown versions, fields, action types, catalog IDs, and untrusted identifiers fail closed.
 
-The model output must include only supported action content.
+## 3. Inject the existing transport
 
-```python
-from hermes_telegram_interaction import (
-    TargetRef,
-    action_plan_to_reply,
-)
+Implement the four synchronous InteractionHost methods around the client the host already owns:
 
-trusted_target = TargetRef(
-    channel="telegram",
-    chat_id="chat-id",
-    message_id="message-id",
-    thread_id="thread-id",
-)
+    from telemood import DeliveryStatus, TransportReceipt
 
-plan = {
-    "actions": [
-        {"kind": "bubble", "text": "Analyzing the request"},
-        {"kind": "reaction", "emoji": "👀"},
-        {"kind": "sticker", "sticker_ref": "known-regular-sticker-ref"},
-        {"kind": "bubble", "text": "I will proceed next"},
-        {"kind": "choices", "prompt": "Continue?", "options": [{"key": "yes", "label": "Yes"}, {"key": "no", "label": "No"}], "callback_ttl_seconds": 1200},
-    ]
-}
+    class ExistingClientAdapter:
+        def __init__(self, existing_client):
+            self.client = existing_client
 
-reply = action_plan_to_reply(
-    plan,
-    target=trusted_target,
-    authorized_user_id="trusted-user-id",
-)
-```
+        def send_bubble(self, request_id, request):
+            result = self.client.send_message(request.target, request.text)
+            return TransportReceipt(
+                DeliveryStatus.VERIFIED,
+                provider_delivery_id=str(result.message_id),
+            )
 
-`kind` is the only action discriminator (`bubble`, `reaction`, `sticker`, `choices`).
-The model must **not** inject target context, token/endpoint, auth user, or tokenized callback data.
+        def send_reaction(self, request_id, request):
+            ...
 
-Sticker actions are `{"kind": "sticker", "sticker_ref": "<logical-sticker-ref>"}`.
-`sticker_ref` must be a known logical/file reference supplied or already allowed by the host or catalog.
-It is not an endpoint; the model cannot invent `target`, `user`, `token`, or `endpoint` fields.
-`action_plan_to_reply` does not validate catalog membership.
+        def send_sticker_sequence(self, request_id, request, parts):
+            # Return one TransportReceipt per attempted part, in order.
+            ...
 
-## 4) Exact Host Adapter Protocol (Synchronous)
+        def send_choices(self, request_id, request, callback_tokens):
+            ...
 
-The host adapter must expose these exact sync methods:
+This example is intentionally SDK-neutral. Do not return VERIFIED unless the provider explicitly confirmed the effect. Map explicit rejection to FAILED, an invalid result to UNKNOWN, and a timeout or uncertain side effect to UNCERTAIN.
 
-```python
-from typing import Mapping, Sequence
-from hermes_telegram_interaction import (
-    BubbleRequest,
-    CallbackToken,
-    ChoicesRequest,
-    InteractionHost,
-    ReactionRequest,
-    StickerRequest,
-    StickerPart,
-    TransportReceipt,
-)
+Check shape without calling transport:
 
-class TelegramHostAdapter(InteractionHost):
-    def send_bubble(self, request_id: str, request: BubbleRequest) -> TransportReceipt: ...
+    from telemood import check_adapter
 
-    def send_reaction(
-        self,
-        request_id: str,
-        request: ReactionRequest,
-    ) -> TransportReceipt: ...
+    result = check_adapter(adapter)
+    assert result.ok
+    assert result.static_only
+    assert not result.live_delivery_verified
 
-    def send_choices(
-        self,
-        request_id: str,
-        request: ChoicesRequest,
-        callback_tokens: Mapping[str, CallbackToken],
-    ) -> TransportReceipt: ...
+Static conformance is not live Telegram verification.
 
-    def send_sticker_sequence(
-        self,
-        request_id: str,
-        request: StickerRequest,
-        parts: Sequence[StickerPart],
-    ) -> Sequence[TransportReceipt]: ...
-```
+## 4. Incoming regular stickers
 
-`InteractionHost` above only defines request boundaries; you may keep additional host methods.
+The host normalizes an incoming Telegram sticker and may attach logical media references. Core never downloads media and never receives the token.
 
-`DeliveryStatus` currently maps as:
+    from telemood import (
+        IncomingSticker,
+        IncomingStickerEvent,
+        SQLiteStickerCatalog,
+        StickerFormat,
+        StickerType,
+        ingest_incoming_sticker,
+    )
 
-- `VERIFIED`: confirmed success
-- `FAILED`: confirmed transport failure
-- `UNKNOWN`: uncertain confirmation
-- `UNCERTAIN`: partial/unverified completion
+    catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
+    event = IncomingStickerEvent(
+        target=trusted_target,
+        sender_user_id=trusted_sender_id,
+        received_at=provider_timestamp,
+        sticker=IncomingSticker(
+            bot_namespace=trusted_bot_namespace,
+            file_id=provider_sticker.file_id,
+            file_unique_id=provider_sticker.file_unique_id,
+            type=StickerType.REGULAR,
+            format=StickerFormat.ANIMATED,
+            emoji=provider_sticker.emoji,
+            set_name=provider_sticker.set_name,
+            thumbnail_ref=host_thumbnail_ref,
+            media_ref=host_media_ref,
+        ),
+    )
+    model_view = ingest_incoming_sticker(event, catalog)
 
-`check_adapter` is static-only validation and does not call host transport.
+model_view contains the opaque catalog ID, normalized text, and optional logical media references. It never contains the reusable provider file_id. Without a media reference, its text explicitly says that image content was not attached.
 
-```python
-from hermes_telegram_interaction import check_adapter
+v0.1 accepts regular stickers in static, animated, or video format. mask and custom_emoji sticker types are rejected and are not cataloged.
 
-result = check_adapter(adapter)
-```
+## 5. Incoming and outgoing reactions
 
-- `result.ok` is the main public success flag (`result.passed` is equivalent).
-- `result.static_only` must be `True` for the current static check mode.
-- `result.live_delivery_verified` is always `False` for `check_adapter` because it is static-only; a separately authorized live probe produces separate evidence and does not mutate this result.
-- `result.issues` is a tuple of per-method reasons when checks fail.
+Reaction sending is disabled until the host supplies confirmed capabilities:
 
-## 5) Kernel and State Initialization
+    from telemood import InteractionCapabilities
 
-```python
-from hermes_telegram_interaction import (
-    InteractionKernel,
-    SQLiteCallbackStore,
-    SQLiteStickerCatalog,
-)
-
-callback_store = SQLiteCallbackStore("state/callbacks.sqlite3")
-sticker_catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
-
-kernel = InteractionKernel(
-    host=adapter,
-    callbacks=callback_store,
-    sticker_catalog=sticker_catalog,
-)
-```
-
-`sticker_catalog` is caller-owned state and may be passed by host path policy.
-
-## 6) Regular Sticker Receive/Send Flow (Correct)
-
-Telemood does not download media and does not create custom sticker sets.
-It works with regular sticker references only.
-
-### 6.1 Inbound sticker normalization and catalog
-
-```python
-from hermes_telegram_interaction import IncomingSticker
-
-# pseudocode
-sticker_catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
-sticker = IncomingSticker(
-    bot_namespace="bot-namespace",
-    file_id=raw_sticker.file_id,
-    file_unique_id=raw_sticker.file_unique_id,
-    emoji=raw_sticker.emoji,
-    set_name=raw_sticker.set_name,
-)
-sticker_catalog.remember(sticker)
-```
-
-### 6.2 Outbound sticker action from model
-
-```python
-from hermes_telegram_interaction import (
-    TargetRef,
-    action_plan_to_reply,
-)
-
-reply = action_plan_to_reply(
-    {"actions": [{"kind": "sticker", "sticker_ref": "known-file-id"}]},
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id"),
-    authorized_user_id="trusted-user-id",
-)
-```
-
-The host can feed `known-file-id` from a catalog-derived logical map it already exposes.
-
-### 6.3 Outbound regular sticker replay by incoming identity
-
-```python
-kernel.send_seen_sticker(
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id"),
-    bot_namespace="bot-namespace",
-    file_unique_id="file-unique-id",
-)
-```
-
-`send_seen_sticker` uses `bot_namespace` + `file_unique_id` to map the known sticker reference in `sticker_catalog`.
-
-## 7) Text Splitting Is Explicit
-
-`split_semantic_bubbles` is **not automatic**.
-
-```python
-from hermes_telegram_interaction import split_semantic_bubbles
-
-bubbles = split_semantic_bubbles(long_text, max_length=4096)
-```
-
-## 8) Execute and Capability Reporting
-
-```python
-from hermes_telegram_interaction import (
-    InteractionCapabilities,
-)
-
-reply = action_plan_to_reply(plan, target=trusted_target, authorized_user_id="trusted-user-id")
-receipts = kernel.execute_reply(
-    reply,
-    request_id="request-001",
-    capabilities=InteractionCapabilities(
+    capabilities = InteractionCapabilities(
         can_send_reactions=True,
-        can_receive_reactions=True,
+        can_receive_reaction_changes=True,
+        can_receive_reaction_counts=True,
+        reaction_updates_subscribed=True,
         available_reactions=("👍", "👀"),
-    ),
-)
-```
+    )
 
-`InteractionCapabilities` fields are:
+Use IncomingReactionChange for actor-bound old/new reaction sets. Use IncomingReactionCount for anonymous aggregate counts. ReactionValue represents emoji, custom_emoji, and paid; v0.1 accepts only ordinary emoji for execution. InteractionKernel.accept_incoming_reaction returns ReactionAcceptance with an explicit rejection reason instead of silently returning None.
 
-- `can_send_reactions`
-- `can_receive_reactions`
-- `available_reactions`
+Telegram reaction updates must be explicitly requested by the host and may require administrator permission. Bot-originated sends must not be synthesized as inbound updates.
 
-## 9) Inbound Routing
+## 6. Callbacks and execution
 
-### 9.1 Inline callback
+Use a host-owned durable callback store when callbacks must survive restarts:
 
-```python
-from hermes_telegram_interaction import CallbackToken
+    from telemood import InteractionKernel, SQLiteCallbackStore
 
-# pseudocode
-resolution = kernel.consume_callback(
-    CallbackToken(raw_callback_data),
-    user_id="trusted-user-id",
-    chat_id="chat-id",
-    thread_id="thread-id",  # optional
-)
-if resolution.accepted:
-    action_key = resolution.payload.value
-else:
-    failure = resolution.reason
-```
+    kernel = InteractionKernel(
+        adapter,
+        callbacks=SQLiteCallbackStore("state/callbacks.sqlite3"),
+        sticker_catalog=catalog,
+    )
+    receipt = kernel.execute_reply(
+        reply,
+        request_id=trusted_request_id,
+        capabilities=capabilities,
+    )
 
-### 9.2 Sticker inbound (normalization example)
+Actions run strictly in plan order. The kernel waits for each receipt and stops on FAILED, UNKNOWN, or UNCERTAIN. The plan receipt records action receipts, stop index, and unexecuted count. Sticker multi-part compatibility requests preserve every returned TransportReceipt.
 
-See Section 6.1 for the normal sticker catalog intake flow.
+Choices bind callback handles to user/chat/thread, TTL, pending/active state, and one-shot consumption. Handles are limited to Telegram's 64 UTF-8 byte callback_data boundary.
 
-### 9.3 Reaction inbound
+## 7. Minimum offline verification
 
-```python
-from hermes_telegram_interaction import (
-    InteractionCapabilities,
-    InteractionKernel,
-    IncomingReaction,
-    TargetRef,
-)
+    python -m unittest discover -s tests -v
+    python -m pip wheel . --no-deps -w dist
 
-# pseudocode
-reaction = IncomingReaction(
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id", thread_id="thread-id"),
-    emoji="👍",
-    user_id="user-id",
-    bot_generated=False,
-)
-normalized = InteractionKernel.accept_incoming_reaction(
-    reaction,
-    capabilities=InteractionCapabilities(can_receive_reactions=True),
-)
-```
-
-`incoming reaction` should include `target` + `emoji` + `user_id`.
-
-## 10) Callback Resolution Shape
-
-`CallbackResolution` fields are:
-
-- `accepted`
-- `reason` (from `CallbackRejection`)
-- `payload` (`CallbackPayload`)
-
-No other fields are assumed.
-
-## 11) Three-Tier Verification
-
-### Tier 1: Static check
-
-```python
-from hermes_telegram_interaction import check_adapter
-
-result = check_adapter(adapter)
-assert result.ok
-assert result.issues == ()
-assert result.static_only
-assert not result.live_delivery_verified
-```
-
-```bash
-python -m unittest tests.test_tm02_agent_setup -v
-```
-
-### Tier 2: Full local regression
-
-```bash
-python -m unittest discover -s tests -p "test*.py" -v
-```
-
-### Tier 3: Authorized live probe
-
-Only perform one short authorized live probe after explicit host authorization.
-Static and offline tests are not proof of live Telegram delivery.
-
-## 12) Capability Report Template
-
-```markdown
-### Telemood Adapter Capability Report
-- Host transport: <SDK + version>
-- Python: <version>
-- send_bubble: Supported / Unsupported
-- send_reaction: Supported / Unsupported
-- send_choices: Supported / Unsupported
-- send_sticker_sequence: Supported / Unsupported
-- can_send_reactions: true/false
-- can_receive_reactions: true/false
-- available_reactions: ["👍", ...]
-- state files: `state/callbacks.sqlite3`, `state/stickers.sqlite3`
-- check_adapter passed: true/false
-- check_adapter static_only: true
-- check_adapter live_delivery_verified: false
-- issues: []
-```
-
-Report capability degradation honestly; do not mark failed items as verified.
-
-## 13) Rollback and State Preservation
-
-1. Disable hooks or route to old host path before process changes.
-2. After explicit authorization, restart host only if required.
-3. Preserve `state/callbacks.sqlite3` and `state/stickers.sqlite3`; never delete during rollback.
+Use synthetic data only. A real send, host mutation, restart, deployment, push, tag, or release requires separate human authorization.

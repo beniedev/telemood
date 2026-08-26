@@ -24,8 +24,8 @@ Run a capability-gap report before any production send and keep model behavior i
 - Lightweight Telegram interaction kernel for model-driven action plans
 - Python `>=3.11`
 - `dependencies = []` means no third-party runtime dependencies, while normal Python/build tooling is still required.
-- Distribution / import compatibility: `hermes-telegram-interaction` / `hermes_telegram_interaction`
-- Zero Hermes dependency
+- Distribution and import: `telemood`
+- Harness- and SDK-neutral core
 
 ## What Telemood Is Not
 
@@ -39,10 +39,13 @@ Run a capability-gap report before any production send and keep model behavior i
 
 - Ordered actions: bubble, reaction, sticker, choices
 - Per-action receipts and stop-on-non-verified execution
-- Trusted plan compilation (`kind` discriminator)
+- Versioned model plan (`telemood.plan.v1`, `type` discriminator) bound to host-owned context
 - One-shot callbacks with bounded store lifetime
-- Bot-scoped `SQLiteStickerCatalog` for seen regular stickers
-- Explicit `split_semantic_bubbles` behavior (must be called before plan compilation)
+- Bot-scoped `SQLiteStickerCatalog` with opaque model-visible IDs for seen regular stickers
+- Automatic conservative bubble splitting during plan binding
+- Explicit reaction-change and anonymous reaction-count contracts with conservative capabilities
+
+The repository, distribution, and Python import all use the public name Telemood.
 
 ## Setup
 

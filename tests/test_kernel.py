@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from hermes_telegram_interaction import (
+from telemood import (
     CallbackRejection,
     ChoiceOption,
     ChoicesRequest,
     CompletionMode,
     DeliveryStatus,
+    InteractionCapabilities,
     InteractionKernel,
     MiniAppRequest,
     ReactionRequest,
@@ -93,7 +94,7 @@ class InteractionKernelTests(unittest.TestCase):
         self.host = FakeHost(self.clock)
         self.ids = iter(f"request-{index}" for index in range(1, 20))
         self.token_index = 0
-        from hermes_telegram_interaction import CallbackRegistry
+        from telemood import CallbackRegistry
 
         self.registry = CallbackRegistry(clock=self.clock, token_factory=self._token)
         self.kernel = InteractionKernel(
@@ -101,6 +102,7 @@ class InteractionKernelTests(unittest.TestCase):
             callbacks=self.registry,
             request_id_factory=lambda: next(self.ids),
         )
+        self.reaction_capabilities = InteractionCapabilities(can_send_reactions=True)
 
     def _token(self) -> str:
         self.token_index += 1
@@ -108,7 +110,9 @@ class InteractionKernelTests(unittest.TestCase):
 
     def test_reaction_is_explicitly_nonblocking(self) -> None:
         receipt = self.kernel.send_reaction(
-            ReactionRequest(target(), "👍"), request_id="reaction-request"
+            ReactionRequest(target(), "👍"),
+            request_id="reaction-request",
+            capabilities=self.reaction_capabilities,
         )
 
         self.assertEqual(receipt.status, DeliveryStatus.VERIFIED)
@@ -118,7 +122,9 @@ class InteractionKernelTests(unittest.TestCase):
 
         self.host.reaction_result = TransportReceipt(DeliveryStatus.UNCERTAIN)
         uncertain = self.kernel.send_reaction(
-            ReactionRequest(target(), "👀"), request_id="reaction-uncertain"
+            ReactionRequest(target(), "👀"),
+            request_id="reaction-uncertain",
+            capabilities=self.reaction_capabilities,
         )
         self.assertEqual(uncertain.status, DeliveryStatus.UNCERTAIN)
         self.assertFalse(uncertain.verified_visible_completion)
@@ -186,6 +192,11 @@ class InteractionKernelTests(unittest.TestCase):
             uncertain.part_statuses,
             (DeliveryStatus.VERIFIED, DeliveryStatus.UNCERTAIN, DeliveryStatus.VERIFIED),
         )
+        self.assertEqual(
+            tuple(receipt.provider_delivery_id for receipt in uncertain.part_receipts),
+            ("text-before", None, "text-after"),
+        )
+        self.assertEqual(uncertain.unexecuted_parts, 0)
         self.assertFalse(uncertain.verified_visible_completion)
         self.assertEqual(self.host.sticker_request_ids, ["sticker-uncertain"])
 
@@ -225,11 +236,29 @@ class InteractionKernelTests(unittest.TestCase):
 
     def test_host_exception_and_invalid_sequence_fail_closed(self) -> None:
         self.host.reaction_result = RuntimeError("synthetic")
-        failed = self.kernel.send_reaction(
-            ReactionRequest(target(), "❌"), request_id="reaction-failed"
+        uncertain = self.kernel.send_reaction(
+            ReactionRequest(target(), "❌"),
+            request_id="reaction-uncertain-exception",
+            capabilities=self.reaction_capabilities,
         )
-        self.assertEqual(failed.status, DeliveryStatus.FAILED)
-        self.assertFalse(failed.verified_visible_completion)
+        self.assertEqual(uncertain.status, DeliveryStatus.UNCERTAIN)
+        self.assertFalse(uncertain.verified_visible_completion)
+
+        self.host.reaction_result = object()
+        unknown_reaction = self.kernel.send_reaction(
+            ReactionRequest(target(), "❓"),
+            request_id="reaction-unknown",
+            capabilities=self.reaction_capabilities,
+        )
+        self.assertEqual(unknown_reaction.status, DeliveryStatus.UNKNOWN)
+
+        self.host.reaction_result = TransportReceipt(DeliveryStatus.FAILED)
+        rejected = self.kernel.send_reaction(
+            ReactionRequest(target(), "👎"),
+            request_id="reaction-rejected",
+            capabilities=self.reaction_capabilities,
+        )
+        self.assertEqual(rejected.status, DeliveryStatus.FAILED)
 
         self.host.sticker_result = []
         unknown = self.kernel.send_sticker(
@@ -248,6 +277,21 @@ class InteractionKernelTests(unittest.TestCase):
         fewer = self.kernel.send_sticker(request, request_id="sticker-fewer")
         self.assertEqual(fewer.status, DeliveryStatus.UNKNOWN)
         self.assertFalse(fewer.verified_visible_completion)
+        self.assertEqual(
+            tuple(receipt.provider_delivery_id for receipt in fewer.part_receipts),
+            ("before", "sticker"),
+        )
+        self.assertEqual(fewer.unexecuted_parts, 1)
+
+        self.host.sticker_result = [
+            TransportReceipt(DeliveryStatus.VERIFIED, "before"),
+            TransportReceipt(DeliveryStatus.FAILED, detail="provider-rejected"),
+        ]
+        partial = self.kernel.send_sticker(request, request_id="sticker-partial")
+        self.assertEqual(partial.status, DeliveryStatus.FAILED)
+        self.assertEqual(partial.part_receipts[0].provider_delivery_id, "before")
+        self.assertEqual(partial.part_receipts[1].detail, "provider-rejected")
+        self.assertEqual(partial.unexecuted_parts, 1)
 
         self.host.sticker_result = [
             TransportReceipt(DeliveryStatus.VERIFIED, "before"),

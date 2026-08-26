@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test
+        run: python -m unittest discover -s tests -v
+
+      - name: Build wheel
+        run: python -m pip wheel . --no-deps -w dist
+
+      - name: Inspect wheel contents
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel, = glob.glob("dist/*.whl")
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+          forbidden = (".sqlite", ".sqlite3", ".env", ".pyc", "__pycache__")
+          leaked = [name for name in names if any(marker in name for marker in forbidden)]
+          if leaked:
+              raise SystemExit(f"forbidden wheel entries: {leaked}")
+          PY
+
+      - name: Clean wheel install and import
+        run: |
+          python -m venv clean-install
+          clean-install/bin/python -m pip install --no-deps dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/clean-install/bin/python" -c "import telemood; print(telemood.__version__)"

@@ -1,363 +1,192 @@
-# Telemood 集成与配置指南
+# Telemood 接入指南
 
-本文档是将 `hermes_telegram_interaction` 接入已有 Telegram 主机 Agent 的权威说明。
-同时适用于人类执行者与编码 Agent。
+[English](SETUP.md)
 
-仓库地址：`https://github.com/beniedev/telemood`
+本文供 Agent 将 Telemood 接入已有 Telegram bot 宿主。token、client、polling/webhook、thread 路由与重连生命周期始终由宿主唯一持有。
 
-## 0）授权边界（必须）
+## 1. 修改宿主前
 
-- 可先执行只读检查、静态校验与离线合成测试。
-- 宿主始终是其已配置 bot token 的唯一持有方。Telemood/适配器集成仅复用宿主现有 Telegram 传输层/客户端，不得请求、读取、复制或持久化 bot token 或任何 raw SDK 句柄。
-- 未经明确人工授权前，不得改动宿主代码/配置、发起线上发送、重启或部署。
-- 上线前需给出能力缺口报告。
+先只读确认：
 
-## 1）先决条件
+- 已有发送方法及其 provider 返回值；
+- 入站消息、sticker、reaction 与 callback 的路由；
+- 是否订阅 reaction update，以及 bot 是否具备所需权限；
+- 由宿主持有的 callback/sticker SQLite 状态路径。
 
-- Python 版本：`>=3.11`
-- 发行包/导入名：`hermes-telegram-interaction`（`import hermes_telegram_interaction`）
-- `dependencies = []` 表示运行时零依赖；不等于“零构建/环境工具”。
-- 本包不持有 Hermes 依赖，也不直接拥有 Telegram 传输能力。
-- 本版本不负责自定义贴纸生成或自建贴纸集发布。
+不要读取或复制 bot token，不要新建第二个 client 或 update loop。
 
-已克隆仓库并授权变更后，使用宿主目标 Python 环境执行：
+当前预发行元数据：
 
-```bash
-python -m pip install .
-```
+    distribution: telemood
+    import: telemood
+    Python: >=3.11
+    runtime dependencies: none
 
-## 2）宿主环境只读勘测
+## 2. 模型计划
 
-接入前确认：
+模型只能返回 JSON 兼容数据，不能选择 chat、user、thread、bot namespace，不能提供 Telegram file_id、token、endpoint 或 SDK object。
 
-1. 宿主已持有 Telegram 客户端、token 与 SDK 生命周期。
-2. 定位消息、回调、反应、贴纸的上行路径。
-3. 找到可安全同步调用的适配器边界。
-4. 选择宿主已有状态路径（例如 `state/callbacks.sqlite3`、`state/stickers.sqlite3`）。
+    {
+      "version": "telemood.plan.v1",
+      "actions": [
+        {"type": "bubble", "text": "我正在检查。"},
+        {"type": "reaction", "target": "trigger_message", "emoji": "👀"},
+        {
+          "type": "sticker",
+          "sticker": {"kind": "catalog", "id": "sticker_opaque_logical_id"}
+        },
+        {
+          "type": "choices",
+          "prompt": "继续吗？",
+          "options": [
+            {"key": "yes", "label": "继续"},
+            {"key": "no", "label": "暂停"}
+          ]
+        }
+      ]
+    }
 
-## 3）目标与授权边界
+先解析，再绑定宿主可信上下文：
 
-`action_plan_to_reply` 支持输入：
+    from telemood import (
+        PlanContext,
+        bind_interaction_plan,
+        parse_interaction_plan,
+    )
 
-- `{"actions": [...]}`
-- `[...]`
+    typed_plan = parse_interaction_plan(model_output)
+    reply = bind_interaction_plan(
+        typed_plan,
+        PlanContext(
+            target=trusted_target,
+            authorized_user_id=trusted_user_id,
+            bot_namespace=trusted_bot_namespace,
+        ),
+        sticker_catalog=sticker_catalog,
+    )
 
-`target` 与 `authorized_user_id` 仅由宿主可信注入；模型不能设置。
+绑定阶段会按“段落、句子、空白、硬切”的保守启发式自动展开长 bubble；展开后仍保持与 reaction、sticker、choices 的相对顺序。这不是模型级语义理解。
 
-```python
-from hermes_telegram_interaction import (
-    TargetRef,
-    action_plan_to_reply,
-)
+未知版本、字段、动作类型、catalog ID 与不可信标识都会 fail closed。
 
-trusted_target = TargetRef(
-    channel="telegram",
-    chat_id="chat-id",
-    message_id="message-id",
-    thread_id="thread-id",
-)
+## 3. 注入已有 transport
 
-plan = {
-    "actions": [
-        {"kind": "bubble", "text": "正在处理请求"},
-        {"kind": "reaction", "emoji": "👀"},
-        {"kind": "sticker", "sticker_ref": "known-regular-sticker-ref"},
-        {"kind": "bubble", "text": "我将继续处理下一步"},
-        {"kind": "choices", "prompt": "继续吗？", "options": [{"key": "yes", "label": "继续"}, {"key": "no", "label": "暂停"}], "callback_ttl_seconds": 1200},
-    ]
-}
+围绕宿主已经创建的 client 实现四个同步 InteractionHost 方法：
 
-reply = action_plan_to_reply(
-    plan,
-    target=trusted_target,
-    authorized_user_id="trusted-user-id",
-)
-```
+    from telemood import DeliveryStatus, TransportReceipt
 
-`kind` 是动作鉴别字段（`bubble`、`reaction`、`sticker`、`choices`）。
-模型不得注入 `target`、`request_id`、token、endpoint 或授权用户字段。
+    class ExistingClientAdapter:
+        def __init__(self, existing_client):
+            self.client = existing_client
 
-贴纸动作只能是 `{"kind": "sticker", "sticker_ref": "<逻辑贴纸引用>"}`。
-`sticker_ref` 必须是宿主或目录已允许的逻辑/文件引用，不是 endpoint。
-模型不能伪造 `target/user/token/endpoint` 字段。
-`action_plan_to_reply` 不会校验 catalog 成员关系。
+        def send_bubble(self, request_id, request):
+            result = self.client.send_message(request.target, request.text)
+            return TransportReceipt(
+                DeliveryStatus.VERIFIED,
+                provider_delivery_id=str(result.message_id),
+            )
 
-## 4）精确同步适配器协议
+        def send_reaction(self, request_id, request):
+            ...
 
-宿主适配器需实现以下同步方法：
+        def send_sticker_sequence(self, request_id, request, parts):
+            # 每个实际尝试的 part 按顺序返回一个 TransportReceipt。
+            ...
 
-```python
-from typing import Mapping, Sequence
-from hermes_telegram_interaction import (
-    BubbleRequest,
-    CallbackToken,
-    ChoicesRequest,
-    InteractionHost,
-    ReactionRequest,
-    StickerRequest,
-    StickerPart,
-    TransportReceipt,
-)
+        def send_choices(self, request_id, request, callback_tokens):
+            ...
 
-class TelegramHostAdapter(InteractionHost):
-    def send_bubble(self, request_id: str, request: BubbleRequest) -> TransportReceipt: ...
+示例刻意不绑定 SDK。只有 provider 明确确认副作用时才能返回 VERIFIED；明确拒绝映射为 FAILED，无法理解的返回映射为 UNKNOWN，超时或副作用状态不确定映射为 UNCERTAIN。
 
-    def send_reaction(
-        self,
-        request_id: str,
-        request: ReactionRequest,
-    ) -> TransportReceipt: ...
+只做静态 shape 检查：
 
-    def send_choices(
-        self,
-        request_id: str,
-        request: ChoicesRequest,
-        callback_tokens: Mapping[str, CallbackToken],
-    ) -> TransportReceipt: ...
+    from telemood import check_adapter
 
-    def send_sticker_sequence(
-        self,
-        request_id: str,
-        request: StickerRequest,
-        parts: Sequence[StickerPart],
-    ) -> Sequence[TransportReceipt]: ...
-```
+    result = check_adapter(adapter)
+    assert result.ok
+    assert result.static_only
+    assert not result.live_delivery_verified
 
-`DeliveryStatus` 在当前版本的含义为：
+静态 conformance 不等于真实 Telegram 联调。
 
-- `VERIFIED`：已明确成功
-- `FAILED`：明确失败
-- `UNKNOWN`：无法确认
-- `UNCERTAIN`：未完全确认/部分完成
+## 4. 入站 regular sticker
 
-`check_adapter` 仅做静态形状检查，不调用线上传输。
+宿主负责规范化 Telegram sticker，也可以附加逻辑 media reference。Core 不下载媒体，也不接收 token。
 
-```python
-from hermes_telegram_interaction import check_adapter
+    from telemood import (
+        IncomingSticker,
+        IncomingStickerEvent,
+        SQLiteStickerCatalog,
+        StickerFormat,
+        StickerType,
+        ingest_incoming_sticker,
+    )
 
-result = check_adapter(adapter)
-```
+    catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
+    event = IncomingStickerEvent(
+        target=trusted_target,
+        sender_user_id=trusted_sender_id,
+        received_at=provider_timestamp,
+        sticker=IncomingSticker(
+            bot_namespace=trusted_bot_namespace,
+            file_id=provider_sticker.file_id,
+            file_unique_id=provider_sticker.file_unique_id,
+            type=StickerType.REGULAR,
+            format=StickerFormat.ANIMATED,
+            emoji=provider_sticker.emoji,
+            set_name=provider_sticker.set_name,
+            thumbnail_ref=host_thumbnail_ref,
+            media_ref=host_media_ref,
+        ),
+    )
+    model_view = ingest_incoming_sticker(event, catalog)
 
-- `result.ok` 是公开成功标记（`result.passed` 等价）。
-- `result.static_only` 需为 `True`。
-- `result.live_delivery_verified` 在 `check_adapter` 中始终为 `False`，因为它仅做静态校验；授权线上探针会产出独立证据，不会变更该结果。
-- `result.issues` 列出不兼容方法。
+model_view 只包含 opaque catalog ID、规范化文本和可选的逻辑媒体引用，不包含可复用的 provider file_id。没有媒体引用时，文本会明确说明未附加图像内容。
 
-## 5）内核与状态初始化
+v0.1 支持 static、animated、video 三种 format 的 regular sticker；mask 与 custom_emoji type 会被拒绝，不会进入 catalog。
 
-```python
-from hermes_telegram_interaction import (
-    InteractionKernel,
-    SQLiteCallbackStore,
-    SQLiteStickerCatalog,
-)
+## 5. 入站与出站 reaction
 
-callback_store = SQLiteCallbackStore("state/callbacks.sqlite3")
-sticker_catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
+宿主明确报告能力前，reaction 发送默认关闭：
 
-kernel = InteractionKernel(
-    host=adapter,
-    callbacks=callback_store,
-    sticker_catalog=sticker_catalog,
-)
-```
+    from telemood import InteractionCapabilities
 
-`sticker_catalog` 由宿主持有，并按宿主路径策略持久化。
-
-## 6）普通贴纸收发流程（准确路径）
-
-Telemood 不下载媒体，不创建自定义贴纸，也不构建贴纸集合。
-
-### 6.1 上行贴纸归一化与登记
-
-```python
-from hermes_telegram_interaction import IncomingSticker
-
-# 伪代码
-sticker_catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
-sticker = IncomingSticker(
-    bot_namespace="bot-namespace",
-    file_id=raw_sticker.file_id,
-    file_unique_id=raw_sticker.file_unique_id,
-    emoji=raw_sticker.emoji,
-    set_name=raw_sticker.set_name,
-)
-sticker_catalog.remember(sticker)
-```
-
-### 6.2 按模型输出发送贴纸引用
-
-```python
-from hermes_telegram_interaction import (
-    TargetRef,
-    action_plan_to_reply,
-)
-
-reply = action_plan_to_reply(
-    {"actions": [{"kind": "sticker", "sticker_ref": "known-file-id"}]},
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id"),
-    authorized_user_id="trusted-user-id",
-)
-```
-
-模型只能返回宿主已知的 `sticker_ref` 逻辑名，`kernel.send_seen_sticker` 可按入站标识回放可见贴纸。
-
-### 6.3 按入站唯一标识回放已见贴纸
-
-```python
-kernel.send_seen_sticker(
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id"),
-    bot_namespace="bot-namespace",
-    file_unique_id="file-unique-id",
-)
-```
-
-`send_seen_sticker` 会在 `sticker_catalog` 中按 `bot_namespace + file_unique_id` 映射到可发送 `file_id`。
-
-## 7）文本切分必须显式调用
-
-`split_semantic_bubbles` **不会自动触发**。
-
-```python
-from hermes_telegram_interaction import split_semantic_bubbles
-
-bubbles = split_semantic_bubbles(long_text, max_length=4096)
-```
-
-## 8）执行与能力上报
-
-```python
-from hermes_telegram_interaction import (
-    InteractionCapabilities,
-)
-
-reply = action_plan_to_reply(plan, target=trusted_target, authorized_user_id="trusted-user-id")
-receipts = kernel.execute_reply(
-    reply,
-    request_id="request-001",
-    capabilities=InteractionCapabilities(
+    capabilities = InteractionCapabilities(
         can_send_reactions=True,
-        can_receive_reactions=True,
+        can_receive_reaction_changes=True,
+        can_receive_reaction_counts=True,
+        reaction_updates_subscribed=True,
         available_reactions=("👍", "👀"),
-    ),
-)
-```
+    )
 
-`InteractionCapabilities` 字段为：
+有 actor 的 old/new reaction set 使用 IncomingReactionChange；匿名聚合计数使用独立的 IncomingReactionCount。ReactionValue 能准确表示 emoji、custom_emoji 与 paid；v0.1 执行层只接受普通 emoji。InteractionKernel.accept_incoming_reaction 返回带明确原因的 ReactionAcceptance，不会把 unavailable、not subscribed、unsupported 都静默变成 None。
 
-- `can_send_reactions`
-- `can_receive_reactions`
-- `available_reactions`
+Telegram reaction update 必须由宿主显式订阅，并可能要求 bot 具备管理员权限。bot 自己发送 reaction 后不得伪造入站 update。
 
-## 9）上行事件路由
+## 6. Callback 与执行
 
-### 9.1 Callback（内联）
+需要跨重启保留 callback 时，使用由宿主持有的持久 store：
 
-```python
-from hermes_telegram_interaction import CallbackToken
+    from telemood import InteractionKernel, SQLiteCallbackStore
 
-# 伪代码
-resolution = kernel.consume_callback(
-    CallbackToken(raw_callback_data),
-    user_id="trusted-user-id",
-    chat_id="chat-id",
-    thread_id="thread-id",  # 可选
-)
-if resolution.accepted:
-    action_key = resolution.payload.value
-else:
-    failure = resolution.reason
-```
+    kernel = InteractionKernel(
+        adapter,
+        callbacks=SQLiteCallbackStore("state/callbacks.sqlite3"),
+        sticker_catalog=catalog,
+    )
+    receipt = kernel.execute_reply(
+        reply,
+        request_id=trusted_request_id,
+        capabilities=capabilities,
+    )
 
-### 9.2 Sticker（上行）
+动作严格按 plan 顺序逐项等待 receipt。遇到 FAILED、UNKNOWN 或 UNCERTAIN 立即停止。最终 receipt 包含 action receipts、停止位置和未执行数量；兼容 multi-part sticker 请求会保留每个完整 TransportReceipt。
 
-参考 6.1 节“普通贴纸收发流程”中的入站归一化流程。
+Choices callback 绑定 user/chat/thread、TTL、pending/active 状态与 one-shot 消费。handle 受 Telegram callback_data 的 64 UTF-8 byte 限制。
 
-### 9.3 Reaction（上行）
+## 7. 最小离线验证
 
-```python
-from hermes_telegram_interaction import (
-    InteractionCapabilities,
-    IncomingReaction,
-    InteractionKernel,
-    TargetRef,
-)
+    python -m unittest discover -s tests -v
+    python -m pip wheel . --no-deps -w dist
 
-# 伪代码
-reaction = IncomingReaction(
-    target=TargetRef(channel="telegram", chat_id="chat-id", message_id="message-id", thread_id="thread-id"),
-    emoji="👍",
-    user_id="user-id",
-    bot_generated=False,
-)
-normalized = InteractionKernel.accept_incoming_reaction(
-    reaction,
-    capabilities=InteractionCapabilities(can_receive_reactions=True),
-)
-```
-
-可用上行反应事件需包含 `target` + `emoji` + `user_id`。
-
-## 10）回调解析返回值
-
-`CallbackResolution` 字段固定为：
-
-- `accepted`
-- `reason`（来自 `CallbackRejection`）
-- `payload`（`CallbackPayload`）
-
-## 11）三层验收
-
-### 一级：适配器静态检查
-
-```python
-from hermes_telegram_interaction import check_adapter
-
-result = check_adapter(adapter)
-assert result.ok
-assert result.issues == ()
-assert result.static_only
-assert not result.live_delivery_verified
-```
-
-```bash
-python -m unittest tests.test_tm02_agent_setup -v
-```
-
-### 二级：完整本地回归
-
-```bash
-python -m unittest discover -s tests -p "test*.py" -v
-```
-
-### 三级：独立授权线上探针
-
-只允许在明确授权后进行一次最小线上探针。静态检查和离线测试不等同于线上发送成功证明。
-
-## 12）能力报告模板
-
-```markdown
-### Telemood 适配器能力报告
-- Host 传输：<SDK + 版本>
-- Python：<版本>
-- send_bubble：支持 / 不支持
-- send_reaction：支持 / 不支持
-- send_choices：支持 / 不支持
-- send_sticker_sequence：支持 / 不支持
-- can_send_reactions：true/false
-- can_receive_reactions：true/false
-- available_reactions：["👍", ...]
-- state 文件：`state/callbacks.sqlite3`, `state/stickers.sqlite3`
-- check_adapter passed：true/false
-- check_adapter static_only：true
-- check_adapter live_delivery_verified：false
-- issues：[]
-```
-
-能力报告应如实写明降级，不得把“失败/缺失”写成“全部成功”。
-
-## 13）回滚与状态保留
-
-1. 先停用旧 hook/路由。
-2. 经明确授权后重启宿主进程（如有必要）。
-3. 保留并保全 `state/callbacks.sqlite3` 与 `state/stickers.sqlite3`，回滚时不得删除。
+测试只使用合成数据。真实发送、宿主修改、重启、部署、push、tag 或 release 都需要单独获得人工授权。

@@ -24,18 +24,21 @@ Telemood 适用于已经有 Telegram 运行时（Telegram Bot API 连接完备�
 - 轻量级交互内核：面向 Telegram 的结构化动作与回执
 - Python 版本：`>=3.11`
 - `dependencies = []`（表示零运行时依赖，不意味着无需常规 Python 环境与构建工具）
-- 发行与导入兼容名：`hermes-telegram-interaction` / `hermes_telegram_interaction`
-- 不依赖 Hermes
+- 发行包与 Python 导入名统一为 `telemood`
+- Core 与具体 harness、SDK 解耦
 - 本版本不提供自制贴纸创建/发布能力
 
 ## Telemood 的能力
 
 - 有序动作：文本气泡、表情回应、贴纸、选择按钮
 - 任一动作未达 `VERIFIED` 时可停止后续执行
-- 使用 `kind` 作为动作鉴别符（非 `type`）
+- 版本化模型计划：`telemood.plan.v1`，动作鉴别字段为 `type`，可信上下文由宿主绑定
 - 受控的回调生命周期与回调状态存储
-- 按 Bot 作用域持久化普通贴纸目录（`SQLiteStickerCatalog`）
-- 显式调用 `split_semantic_bubbles`（非自动语义切分）
+- 按 Bot 作用域持久化普通贴纸目录，并只向模型暴露 opaque logical ID
+- plan 绑定时自动执行保守的语义气泡启发式切割
+- 明确区分 reaction change 与匿名 reaction count，能力默认保守关闭
+
+仓库名、发行包名与 Python 导入名均统一为 Telemood。
 
 ## 速览配置
 

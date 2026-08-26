@@ -14,13 +14,17 @@ from .contracts import (
     ChoicesRequest,
     CompletionMode,
     DeliveryStatus,
-    IncomingReaction,
+    IncomingReactionChange,
+    IncomingReactionCount,
     InteractionCapabilities,
     InteractionHost,
     InteractionKind,
     InteractionReceipt,
     MiniAppRequest,
+    ReactionAcceptance,
+    ReactionRejection,
     ReactionRequest,
+    ReactionType,
     RichReply,
     RichReplyReceipt,
     StickerRequest,
@@ -58,19 +62,20 @@ class InteractionKernel:
         capabilities: InteractionCapabilities | None = None,
     ) -> InteractionReceipt:
         request_id = self._resolve_request_id(request_id)
-        if capabilities is not None:
-            if not isinstance(capabilities, InteractionCapabilities):
-                raise TypeError("capabilities must be InteractionCapabilities")
-            if not capabilities.can_send_emoji(request.emoji):
-                return self._receipt(
-                    request_id=request_id,
-                    kind=InteractionKind.REACTION,
-                    transport=TransportReceipt(
-                        DeliveryStatus.FAILED,
-                        detail="reaction_capability_unavailable",
-                    ),
-                    completion_mode=CompletionMode.NONBLOCKING,
-                )
+        capabilities = capabilities or InteractionCapabilities()
+        if not isinstance(capabilities, InteractionCapabilities):
+            raise TypeError("capabilities must be InteractionCapabilities")
+        if not capabilities.can_send_emoji(request.emoji):
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.REACTION,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail=capabilities.reaction_unavailable_reason
+                    or "reaction_capability_unavailable",
+                ),
+                completion_mode=CompletionMode.NONBLOCKING,
+            )
         transport = self._call_single(
             lambda: self._host.send_reaction(request_id, request)
         )
@@ -143,18 +148,26 @@ class InteractionKernel:
     ) -> InteractionReceipt:
         request_id = self._resolve_request_id(request_id)
         parts = request.parts
-        transport_parts = self._call_sequence(
+        transport_parts, sequence_valid = self._call_sequence(
             lambda: self._host.send_sticker_sequence(request_id, request, parts),
             expected_count=len(parts),
         )
         status = self._combine_statuses(transport_parts)
-        transport = TransportReceipt(status, detail="sticker_sequence")
+        if not sequence_valid and status is DeliveryStatus.VERIFIED:
+            status = DeliveryStatus.UNKNOWN
+        transport = TransportReceipt(
+            status,
+            detail="sticker_sequence"
+            if sequence_valid
+            else "invalid_transport_sequence_length",
+        )
         return self._receipt(
             request_id=request_id,
             kind=InteractionKind.STICKER,
             transport=transport,
             completion_mode=CompletionMode.BLOCKING,
-            part_statuses=tuple(item.status for item in transport_parts),
+            part_receipts=transport_parts,
+            total_parts=max(len(parts), len(transport_parts)),
         )
 
     def send_miniapp(
@@ -319,25 +332,79 @@ class InteractionKernel:
             request_id=request_id,
         )
 
+    def send_catalog_sticker(
+        self,
+        target: TargetRef,
+        bot_namespace: str,
+        catalog_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> InteractionReceipt:
+        request_id = self._resolve_request_id(request_id)
+        if self._sticker_catalog is None:
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.STICKER,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail="sticker_catalog_unavailable",
+                ),
+                completion_mode=CompletionMode.BLOCKING,
+            )
+        sticker = self._sticker_catalog.resolve(bot_namespace, catalog_id)
+        if sticker is None:
+            return self._receipt(
+                request_id=request_id,
+                kind=InteractionKind.STICKER,
+                transport=TransportReceipt(
+                    DeliveryStatus.FAILED,
+                    detail="sticker_catalog_id_unknown",
+                ),
+                completion_mode=CompletionMode.BLOCKING,
+            )
+        return self.send_sticker(
+            StickerRequest(target=target, sticker_ref=sticker.file_id),
+            request_id=request_id,
+        )
+
     @staticmethod
     def accept_incoming_reaction(
-        reaction: IncomingReaction,
+        reaction: IncomingReactionChange | IncomingReactionCount,
         capabilities: InteractionCapabilities,
-    ) -> IncomingReaction | None:
-        if not isinstance(reaction, IncomingReaction):
-            raise TypeError("reaction must be IncomingReaction")
+    ) -> ReactionAcceptance:
+        if not isinstance(reaction, (IncomingReactionChange, IncomingReactionCount)):
+            raise TypeError("reaction must be an incoming reaction event")
         if not isinstance(capabilities, InteractionCapabilities):
             raise TypeError("capabilities must be InteractionCapabilities")
-        if not capabilities.can_receive_reactions or not reaction.is_user_event:
-            return None
-        return reaction
+        can_receive = (
+            capabilities.can_receive_reaction_changes
+            if isinstance(reaction, IncomingReactionChange)
+            else capabilities.can_receive_reaction_counts
+        )
+        if not can_receive:
+            return ReactionAcceptance(False, reason=ReactionRejection.CAPABILITY_UNAVAILABLE)
+        if not capabilities.reaction_updates_subscribed:
+            return ReactionAcceptance(False, reason=ReactionRejection.UPDATES_NOT_SUBSCRIBED)
+        if isinstance(reaction, IncomingReactionChange) and reaction.bot_generated:
+            return ReactionAcceptance(False, reason=ReactionRejection.BOT_GENERATED)
+        values = (
+            reaction.old_reactions + reaction.new_reactions
+            if isinstance(reaction, IncomingReactionChange)
+            else tuple(count.reaction for count in reaction.counts)
+        )
+        if any(value.type is not ReactionType.EMOJI for value in values):
+            return ReactionAcceptance(
+                False,
+                reason=ReactionRejection.UNSUPPORTED_REACTION_TYPE,
+            )
+        return ReactionAcceptance(True, event=reaction)
 
     @staticmethod
     def _call_single(call: Callable[[], object]) -> TransportReceipt:
         try:
             result = call()
         except Exception:
-            return TransportReceipt(DeliveryStatus.FAILED, detail="host_exception")
+            return TransportReceipt(DeliveryStatus.UNCERTAIN, detail="host_exception")
         if not isinstance(result, TransportReceipt):
             return TransportReceipt(DeliveryStatus.UNKNOWN, detail="invalid_transport_receipt")
         return result
@@ -347,28 +414,39 @@ class InteractionKernel:
         call: Callable[[], object],
         *,
         expected_count: int,
-    ) -> tuple[TransportReceipt, ...]:
+    ) -> tuple[tuple[TransportReceipt, ...], bool]:
         try:
             result = call()
         except Exception:
-            return (TransportReceipt(DeliveryStatus.FAILED, detail="host_exception"),)
-        if isinstance(result, (str, bytes)) or not isinstance(result, Sequence):
-            return (TransportReceipt(DeliveryStatus.UNKNOWN, detail="invalid_transport_sequence"),)
-        receipts = tuple(
-            item
-            for item in result
-            if isinstance(item, TransportReceipt)
-        )
-        if len(receipts) != len(result):
-            return (TransportReceipt(DeliveryStatus.UNKNOWN, detail="invalid_transport_sequence"),)
-        if len(receipts) != expected_count:
             return (
-                TransportReceipt(
-                    DeliveryStatus.UNKNOWN,
-                    detail="invalid_transport_sequence_length",
-                ),
+                (TransportReceipt(DeliveryStatus.UNCERTAIN, detail="host_exception"),),
+                False,
             )
-        return receipts
+        if isinstance(result, (str, bytes)) or not isinstance(result, Sequence):
+            return (
+                (
+                    TransportReceipt(
+                        DeliveryStatus.UNKNOWN,
+                        detail="invalid_transport_sequence",
+                    ),
+                ),
+                False,
+            )
+        receipts: list[TransportReceipt] = []
+        valid_items = True
+        for index, item in enumerate(result):
+            if isinstance(item, TransportReceipt):
+                receipts.append(item)
+            else:
+                receipts.append(
+                    TransportReceipt(
+                        DeliveryStatus.UNKNOWN,
+                        detail=f"invalid_transport_receipt_at_part_{index}",
+                    )
+                )
+                valid_items = False
+                break
+        return tuple(receipts), valid_items and len(receipts) == expected_count
 
     @staticmethod
     def _combine_statuses(receipts: Sequence[TransportReceipt]) -> DeliveryStatus:
@@ -389,7 +467,8 @@ class InteractionKernel:
         transport: TransportReceipt,
         completion_mode: CompletionMode,
         callback_tokens: tuple[CallbackToken, ...] = (),
-        part_statuses: tuple[DeliveryStatus, ...] = (),
+        part_receipts: tuple[TransportReceipt, ...] = (),
+        total_parts: int = 0,
     ) -> InteractionReceipt:
         verified_completion = (
             transport.status is DeliveryStatus.VERIFIED
@@ -404,7 +483,8 @@ class InteractionKernel:
             provider_delivery_id=transport.provider_delivery_id,
             callback_tokens=callback_tokens,
             detail=transport.detail,
-            part_statuses=part_statuses,
+            part_receipts=part_receipts,
+            total_parts=total_parts,
         )
 
     def _resolve_request_id(self, request_id: str | None) -> str:

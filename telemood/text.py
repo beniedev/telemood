@@ -6,7 +6,7 @@ import re
 
 
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n[ \t\r\n]*")
-_SENTENCE_BREAK = re.compile(r"(?<=[.!?。！？])(?=\s)")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?。！？])")
 _WHITESPACE_BREAK = re.compile(r"\s+")
 
 

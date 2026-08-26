@@ -4,7 +4,7 @@ import inspect
 import unittest
 from itertools import count
 
-from hermes_telegram_interaction import (
+from telemood import (
     CallbackPayload,
     CallbackRegistry,
     CallbackStore,
@@ -31,7 +31,7 @@ class _BulkStore:
     def __init__(self) -> None:
         tokens = count()
         self.registry = CallbackRegistry(
-            token_factory=lambda: f"hti2:synthetic-{next(tokens)}"
+            token_factory=lambda: f"telemood-test:synthetic-{next(tokens)}"
         )
 
     def register(self, **kwargs):
@@ -55,7 +55,7 @@ class _ChoicesHost:
 
 class PublicContractTests(unittest.TestCase):
     def test_callback_registry_implements_callback_store(self) -> None:
-        registry = CallbackRegistry(token_factory=lambda: "hti2:synthetic")
+        registry = CallbackRegistry(token_factory=lambda: "telemood-test:synthetic")
         self.assertIsInstance(registry, CallbackStore)
 
     def test_bulk_store_shape_is_accepted(self) -> None:
@@ -104,7 +104,7 @@ class PublicContractTests(unittest.TestCase):
         )
 
     def test_registry_round_trip_uses_public_types(self) -> None:
-        registry = CallbackRegistry(token_factory=lambda: "hti2:synthetic")
+        registry = CallbackRegistry(token_factory=lambda: "telemood-test:synthetic")
         token = registry.register(
             user_id="user",
             chat_id="chat",
