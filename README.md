@@ -86,9 +86,14 @@ The repository, distribution, and Python import all use the public name Telemood
 
 ## Status and verification
 
-Telemood `0.1.0` is an early pre-release. Its contracts and adapters are
+Telemood `0.1.0rc1` is an early pre-release. Its contracts and adapters are
 covered by synthetic offline tests, but the package has not been verified
 against every Telegram SDK or host runtime; the API may still change.
+
+Built-in inbound normalizers cover regular sticker messages, reaction
+change/count updates, and message-backed callbacks. Generic text messages,
+Telegram Business messages, and inline-mode callbacks are not normalized in
+this release; hosts must route any additional update types themselves.
 
 CI runs the full unit-test suite on Python 3.11, 3.12, and 3.13, builds the
 wheel, checks its path allowlist and selected sensitive-content patterns, and

@@ -54,7 +54,9 @@
     python -m pip install .
     python -c "import telemood; print(telemood.__version__)"
 
-预期版本为 `0.1.0`。运行时依赖为空，但构建包时仍可能使用常规 Python build requirements。优先正常安装，不要把检出目录手工塞进 `sys.path`。
+预期版本为 `0.1.0rc1`。运行时依赖为空，但构建包时仍可能使用常规 Python build requirements。优先正常安装，不要把检出目录手工塞进 `sys.path`。
+
+内置入站规范化目前只覆盖普通贴纸消息、reaction change/count update，以及包含消息对象的 callback。本版本的通用文本消息、Telegram Business 消息与 inline-mode callback 必须由宿主自行路由和规范化。
 
 ## 4. 模型计划
 

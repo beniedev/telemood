@@ -71,7 +71,9 @@ Telemood 适用于已经有 Telegram 运行时（Telegram Bot API 连接完备�
 
 ## 状态与验证
 
-Telemood `0.1.0` 是早期预发布。contracts 与 adapters 已由合成离线测试覆盖，但尚未对所有 Telegram SDK 或宿主运行时完成验证，API 仍可能变化。
+Telemood `0.1.0rc1` 是早期预发布。contracts 与 adapters 已由合成离线测试覆盖，但尚未对所有 Telegram SDK 或宿主运行时完成验证，API 仍可能变化。
+
+内置入站 normalizer 目前覆盖普通贴纸消息、reaction change/count update，以及带有消息对象的 callback。通用文本消息、Telegram Business 消息与 inline-mode callback 本版本不负责规范化；其他 update 类型仍由宿主自行路由。
 
 CI 会在 Python 3.11、3.12、3.13 上运行完整单元测试，构建 wheel，检查路径白名单与选定的敏感内容模式，并验证干净安装和 `import telemood`。这些检查验证的是包本身，不代表任意具体生产部署已经安全。
 

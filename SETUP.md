@@ -59,9 +59,14 @@ checkout:
     python -m pip install .
     python -c "import telemood; print(telemood.__version__)"
 
-Expected version: `0.1.0`. Runtime dependencies are empty; normal Python
+Expected version: `0.1.0rc1`. Runtime dependencies are empty; normal Python
 build requirements may still be used while building the package. Prefer a
 normal install rather than adding the checkout to `sys.path`.
+
+Built-in inbound normalization is limited to regular sticker messages,
+reaction change/count updates, and callbacks containing a message object.
+Generic text messages, Telegram Business messages, and inline-mode callbacks
+must be routed and normalized by the host in this release.
 
 ## 4. Model plan
 
