@@ -5,3 +5,14 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+.env
+.env.*
+!.env.example
+
+*.sqlite
+*.sqlite3
+state/
+
+*.log
+.DS_Store
