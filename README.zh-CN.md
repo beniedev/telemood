@@ -10,15 +10,7 @@ Telemood 适用于已经有 Telegram 运行时（Telegram Bot API 连接完备�
 
 一次回答可以严格按顺序组合：对触发消息的 reaction、几条短气泡、普通贴纸和可点按的选择按钮：
 
-> **你：** 帮我看看服务为什么停了
->
-> **Agent：** 👀 *（对你的消息作出 reaction）*
->
-> 我正在检查最近的事件。 *（气泡）*
->
-> 连接失败了，下一步怎么处理？ *（气泡）*
->
-> `[重试]` `[查看详情]` *（选择按钮）*
+<img src="assets/telemood-telegram-demo.png" alt="Telegram 实际效果：一次回答按顺序组合语义气泡、reaction、普通贴纸和选择按钮" width="640">
 
 ## 速答
 

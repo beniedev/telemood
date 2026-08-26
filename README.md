@@ -11,15 +11,7 @@ Start from the included dependency-free adapter facade or implement the host pro
 One reply can combine a reaction on the triggering message, several short
 bubbles, a regular sticker, and tappable choices in a strict order:
 
-> **You:** Can you check why the service stopped?
->
-> **Agent:** 👀 *(reaction on your message)*
->
-> I am checking the recent events. *(bubble)*
->
-> The connection failed. What should I do next? *(bubble)*
->
-> `[Retry]` `[Show details]` *(choice buttons)*
+<img src="assets/telemood-telegram-demo.png" alt="Telegram demo showing semantic bubbles, a reaction, a regular sticker, and choice buttons in one ordered reply" width="640">
 
 ## Quick answers
 
