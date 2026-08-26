@@ -15,7 +15,9 @@ from .contracts import (
     IncomingStickerEvent,
     RegularSticker,
     StickerFormat,
+    StickerModelEvent,
     StickerModelView,
+    StickerSenderKind,
     StickerType,
 )
 
@@ -226,7 +228,7 @@ def sticker_catalog_id(bot_namespace: str, file_unique_id: str) -> str:
 def ingest_incoming_sticker(
     event: IncomingStickerEvent,
     catalog: StickerCatalog,
-) -> StickerModelView:
+) -> StickerModelEvent:
     """Remember a supported sticker and return a safe, honest model-facing view."""
 
     if not isinstance(event, IncomingStickerEvent):
@@ -241,11 +243,21 @@ def ingest_incoming_sticker(
         details.append(f"set {stored.set_name}")
     if stored.thumbnail_ref is None and stored.media_ref is None:
         details.append("image content not attached")
-    return StickerModelView(
-        catalog_id=stored.catalog_id,
-        text="; ".join(details),
-        thumbnail_ref=stored.thumbnail_ref,
-        media_ref=stored.media_ref,
+    return StickerModelEvent(
+        sticker=StickerModelView(
+            catalog_id=stored.catalog_id,
+            text="; ".join(details),
+            thumbnail_ref=stored.thumbnail_ref,
+            media_ref=stored.media_ref,
+        ),
+        sender_kind=(
+            StickerSenderKind.USER
+            if event.sender_user_id is not None
+            else StickerSenderKind.CHAT
+        ),
+        target_role=event.target.channel,
+        in_thread=event.target.thread_id is not None,
+        occurred_at=event.received_at,
     )
 
 

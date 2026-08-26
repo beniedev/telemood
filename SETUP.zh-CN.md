@@ -22,7 +22,41 @@
     Python: >=3.11
     runtime dependencies: none
 
-## 2. 模型计划
+最后输出一份简短的只读报告；不知道时写 `unknown`，不要猜：
+
+    TELEMOOD CAPABILITY REPORT
+    Host runtime:            <框架与执行模型>
+    Transport ownership:     <client、token、update loop 的 owner>
+    Boundary:                sync | async | mixed
+    Send methods found:      <现有入口>
+    Sticker/callback routes: <路径 | none>
+    Reaction subscriptions:  change=<yes|no|unknown>, count=<yes|no|unknown>
+    Usable now:              <bubble/reaction/sticker/choices 子集>
+    Degraded or missing:     <项目 — 原因>
+    Files to modify:         <列表>
+    Authorization needed:    <下一项需要授权的准确动作>
+
+## 2. 授权边界
+
+无需 live 授权即可进行：
+
+- 读取仓库和宿主代码、schema、路由、权限与状态路径形状，但不打开 secret 值；
+- 在仓库检出中运行合成单元测试并构建 wheel；
+- 运行不会调用 transport 的 `check_adapter`；
+- 编写能力报告。
+
+安装、修改宿主代码/配置、真实 Telegram 发送、重启/部署，以及任何 push/tag/release，都需要明确人工授权。不明确属于只读或 checkout-local 的动作，一律按需要授权处理。
+
+## 3. 安装
+
+宿主所有者授权修改 Python 环境后，在仓库检出目录执行：
+
+    python -m pip install .
+    python -c "import telemood; print(telemood.__version__)"
+
+预期版本为 `0.1.0`。运行时依赖为空，但构建包时仍可能使用常规 Python build requirements。优先正常安装，不要把检出目录手工塞进 `sys.path`。
+
+## 4. 模型计划
 
 模型只能返回 JSON 兼容数据，不能选择 chat、user、thread、bot namespace，不能提供 Telegram file_id、token、endpoint 或 SDK object。
 
@@ -61,113 +95,132 @@
             target=trusted_target,
             authorized_user_id=trusted_user_id,
             bot_namespace=trusted_bot_namespace,
+            callback_ttl_seconds=1800.0,
         ),
         sticker_catalog=sticker_catalog,
     )
 
 绑定阶段会按“段落、句子、空白、硬切”的保守启发式自动展开长 bubble；展开后仍保持与 reaction、sticker、choices 的相对顺序。这不是模型级语义理解。
 
-未知版本、字段、动作类型、catalog ID 与不可信标识都会 fail closed。
+Callback TTL 由宿主通过 `PlanContext` 或 `action_plan_to_reply(..., callback_ttl_seconds=...)` 持有，模型 JSON 不能设置。未知版本、字段、动作类型、catalog ID 与不可信标识都会 fail closed。MiniApp 不属于 v0.1 公开 API。
 
-## 3. 注入已有 transport
+## 5. 注入已有 transport
 
-围绕宿主已经创建的 client 实现四个同步 InteractionHost 方法：
+使用内置 injected-client adapter，或直接实现 `InteractionHost`。下面的
+facade 完整且不绑定 provider：四个宿主 callable 都接收 keyword arguments，
+并返回 `InjectedResult`。
 
-    from telemood import DeliveryStatus, TransportReceipt
+    from telemood import InjectedResult, InjectedTelegramAdapter
 
-    class ExistingClientAdapter:
-        def __init__(self, existing_client):
-            self.client = existing_client
+    class ExistingClientFacade:
+        def __init__(self, *, send_message, set_reaction, send_sticker, send_choices):
+            self._send_message = send_message
+            self._set_reaction = set_reaction
+            self._send_sticker = send_sticker
+            self._send_choices = send_choices
 
-        def send_bubble(self, request_id, request):
-            result = self.client.send_message(request.target, request.text)
-            return TransportReceipt(
-                DeliveryStatus.VERIFIED,
-                provider_delivery_id=str(result.message_id),
-            )
+        def send_message(self, **kwargs):
+            return self._send_message(**kwargs)
 
-        def send_reaction(self, request_id, request):
-            ...
+        def set_reaction(self, **kwargs):
+            return self._set_reaction(**kwargs)
 
-        def send_sticker_sequence(self, request_id, request, parts):
-            # 每个实际尝试的 part 按顺序返回一个 TransportReceipt。
-            ...
+        def send_sticker(self, **kwargs):
+            return self._send_sticker(**kwargs)
 
-        def send_choices(self, request_id, request, callback_tokens):
-            ...
+        def send_choices(self, **kwargs):
+            return self._send_choices(**kwargs)
 
-示例刻意不绑定 SDK。只有 provider 明确确认副作用时才能返回 VERIFIED；明确拒绝映射为 FAILED，无法理解的返回映射为 UNKNOWN，超时或副作用状态不确定映射为 UNCERTAIN。
+    facade = ExistingClientFacade(
+        send_message=host_send_message,
+        set_reaction=host_set_reaction,
+        send_sticker=host_send_sticker,
+        send_choices=host_send_choices,
+    )
+    adapter = InjectedTelegramAdapter(facade)
+
+每个 `host_*` callable 负责把既有 client 操作映射成
+`InjectedResult(accepted=..., provider_delivery_id=..., detail=...)`。明确接受映射为 `VERIFIED`，明确拒绝映射为 `FAILED`，非法返回映射为 `UNKNOWN`，超时或副作用不确定的异常映射为 `UNCERTAIN`。不能只因为调用返回就声称成功。
+
+异步宿主提供四个对应的 `async def` facade 方法，并使用
+`AsyncInjectedTelegramAdapter` 与 `AsyncInteractionKernel`。不要在已运行的 event loop 内调用 `asyncio.run()` 或 `loop.run_until_complete()`，也不要在 adapter 内另造 event-loop bridge。
 
 只做静态 shape 检查：
 
     from telemood import check_adapter
 
-    result = check_adapter(adapter)
+    result = check_adapter(adapter, mode="sync")  # 异步使用 mode="async"
     assert result.ok
     assert result.static_only
     assert not result.live_delivery_verified
 
 静态 conformance 不等于真实 Telegram 联调。
 
-## 4. 入站 regular sticker
+Sticker sequence 严格按顺序发送，遇到首个 non-`VERIFIED` 即停止。只有最后一个已尝试 receipt 为 non-`VERIFIED` 时，较短的 receipt 序列才是合法提前停止；全 `VERIFIED` 却缺 receipt、receipt 超量或 non-verified 后继续发送都属于协议错误。
 
-宿主负责规范化 Telegram sticker，也可以附加逻辑 media reference。Core 不下载媒体，也不接收 token。
+## 6. 入站 regular sticker
+
+内置 normalizer 接收 Telegram Bot API update mapping。宿主提供 bot namespace 与可选的逻辑媒体引用；Telemood 不下载媒体，也不接收 token。
 
     from telemood import (
-        IncomingSticker,
-        IncomingStickerEvent,
         SQLiteStickerCatalog,
-        StickerFormat,
-        StickerType,
         ingest_incoming_sticker,
+        normalize_incoming_sticker,
     )
 
     catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
-    event = IncomingStickerEvent(
-        target=trusted_target,
-        sender_user_id=trusted_sender_id,
-        received_at=provider_timestamp,
-        sticker=IncomingSticker(
-            bot_namespace=trusted_bot_namespace,
-            file_id=provider_sticker.file_id,
-            file_unique_id=provider_sticker.file_unique_id,
-            type=StickerType.REGULAR,
-            format=StickerFormat.ANIMATED,
-            emoji=provider_sticker.emoji,
-            set_name=provider_sticker.set_name,
-            thumbnail_ref=host_thumbnail_ref,
-            media_ref=host_media_ref,
-        ),
+    event = normalize_incoming_sticker(
+        update,
+        bot_namespace=trusted_bot_namespace,
+        thumbnail_ref=host_thumbnail_ref,
+        media_ref=host_media_ref,
     )
-    model_view = ingest_incoming_sticker(event, catalog)
+    model_event = ingest_incoming_sticker(event, catalog)
 
-model_view 只包含 opaque catalog ID、规范化文本和可选的逻辑媒体引用，不包含可复用的 provider file_id。没有媒体引用时，文本会明确说明未附加图像内容。
+`model_event.sticker` 包含 opaque catalog ID、规范化文本与可选逻辑媒体引用；event 还提供 sender kind、target role、thread presence 与发生时间，但不暴露可复用的 provider `file_id`。没有媒体引用时，`model_event.sticker.text` 会明确说明未附加图像；模型只看到了 metadata。
 
 v0.1 支持 static、animated、video 三种 format 的 regular sticker；mask 与 custom_emoji type 会被拒绝，不会进入 catalog。
 
-## 5. 入站与出站 reaction
+## 7. 入站与出站 reaction
 
 宿主明确报告能力前，reaction 发送默认关闭：
 
-    from telemood import InteractionCapabilities
+    from telemood import (
+        InteractionCapabilities,
+        normalize_incoming_reaction_change,
+        normalize_incoming_reaction_count,
+    )
 
     capabilities = InteractionCapabilities(
         can_send_reactions=True,
         can_receive_reaction_changes=True,
         can_receive_reaction_counts=True,
-        reaction_updates_subscribed=True,
+        message_reaction_subscribed=True,
+        message_reaction_count_subscribed=True,
         available_reactions=("👍", "👀"),
+        reaction_change_unavailable_reason=None,
+        reaction_count_unavailable_reason=None,
     )
 
-有 actor 的 old/new reaction set 使用 IncomingReactionChange；匿名聚合计数使用独立的 IncomingReactionCount。ReactionValue 能准确表示 emoji、custom_emoji 与 paid；v0.1 执行层只接受普通 emoji。InteractionKernel.accept_incoming_reaction 返回带明确原因的 ReactionAcceptance，不会把 unavailable、not subscribed、unsupported 都静默变成 None。
+分别规范化 `message_reaction` 与 `message_reaction_count` update：
+
+    change = normalize_incoming_reaction_change(update)
+    count = normalize_incoming_reaction_count(update)
+
+Change update 保留 actor 与 old/new reaction set；count update 是匿名聚合，可能延迟送达。两者的订阅状态与不可用原因独立。`ReactionValue` 可表示 emoji、custom emoji 与 paid reaction；v0.1 执行层只接受普通 emoji。`InteractionKernel.accept_incoming_reaction` 会返回明确的接受/拒绝原因和可选 capability detail。
 
 Telegram reaction update 必须由宿主显式订阅，并可能要求 bot 具备管理员权限。bot 自己发送 reaction 后不得伪造入站 update。
 
-## 6. Callback 与执行
+## 8. Callback 与执行
 
-需要跨重启保留 callback 时，使用由宿主持有的持久 store：
+需要跨重启保留 callback 时，使用由宿主持有的持久 store，并选择与 adapter 模式一致的 kernel：
 
-    from telemood import InteractionKernel, SQLiteCallbackStore
+    from telemood import (
+        AsyncInteractionKernel,
+        InteractionKernel,
+        SQLiteCallbackStore,
+        normalize_callback_query,
+    )
 
     kernel = InteractionKernel(
         adapter,
@@ -180,11 +233,32 @@ Telegram reaction update 必须由宿主显式订阅，并可能要求 bot 具�
         capabilities=capabilities,
     )
 
+    async_kernel = AsyncInteractionKernel(
+        async_adapter,
+        callbacks=SQLiteCallbackStore("state/callbacks.sqlite3"),
+        sticker_catalog=catalog,
+    )
+    async_receipt = await async_kernel.execute_reply(
+        reply,
+        request_id=trusted_request_id,
+        capabilities=capabilities,
+    )
+
 动作严格按 plan 顺序逐项等待 receipt。遇到 FAILED、UNKNOWN 或 UNCERTAIN 立即停止。最终 receipt 包含 action receipts、停止位置和未执行数量；兼容 multi-part sticker 请求会保留每个完整 TransportReceipt。
 
-Choices callback 绑定 user/chat/thread、TTL、pending/active 状态与 one-shot 消费。handle 受 Telegram callback_data 的 64 UTF-8 byte 限制。
+Choices callback 绑定 user/chat/thread、宿主持有的 TTL、pending/active 状态与 one-shot 消费。handle 受 Telegram `callback_data` 的 64 UTF-8 byte 限制。通过同一个 kernel/store 规范化并消费 callback：
 
-## 7. 最小离线验证
+    callback = normalize_callback_query(update)
+    resolution = kernel.consume_callback(
+        callback.token,
+        user_id=callback.user_id,
+        chat_id=callback.target.chat_id,
+        thread_id=callback.target.thread_id,
+    )
+
+## 9. 最小离线验证
+
+安装前先在仓库检出中运行，修改后再重复：
 
     python -m unittest discover -s tests -v
     python -m pip wheel . --no-deps -w dist

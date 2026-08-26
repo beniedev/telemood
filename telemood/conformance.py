@@ -14,6 +14,7 @@ class MethodCheck:
     callable: bool
     synchronous: bool
     signature_compatible: bool
+    expected_mode: str = "sync"
     detail: str | None = None
 
     @property
@@ -21,7 +22,7 @@ class MethodCheck:
         return (
             self.present
             and self.callable
-            and self.synchronous
+            and self.synchronous == (self.expected_mode == "sync")
             and self.signature_compatible
         )
 
@@ -61,22 +62,30 @@ _METHOD_ARITIES = {
 }
 
 
-def check_adapter(adapter: object) -> AdapterCheckResult:
-    """Check the four synchronous ``InteractionHost`` methods statically.
+def check_adapter(adapter: object, *, mode: str = "sync") -> AdapterCheckResult:
+    """Check the four host methods for the requested execution model.
 
     ``inspect.getattr_static`` is used so descriptors are inspected without
     invoking adapter methods or any transport.  The check only validates
     callable shape; it cannot prove Telegram delivery.
     """
 
+    if mode not in {"sync", "async"}:
+        raise ValueError("mode must be 'sync' or 'async'")
     checks = tuple(
-        _check_method(adapter, name, arity)
+        _check_method(adapter, name, arity, mode=mode)
         for name, arity in _METHOD_ARITIES.items()
     )
     return AdapterCheckResult(methods=checks)
 
 
-def _check_method(adapter: object, name: str, arity: int) -> MethodCheck:
+def _check_method(
+    adapter: object,
+    name: str,
+    arity: int,
+    *,
+    mode: str,
+) -> MethodCheck:
     try:
         raw = inspect.getattr_static(adapter, name)
     except (AttributeError, TypeError):
@@ -86,6 +95,7 @@ def _check_method(adapter: object, name: str, arity: int) -> MethodCheck:
             callable=False,
             synchronous=False,
             signature_compatible=False,
+            expected_mode=mode,
             detail="missing",
         )
 
@@ -97,19 +107,21 @@ def _check_method(adapter: object, name: str, arity: int) -> MethodCheck:
             callable=False,
             synchronous=False,
             signature_compatible=False,
+            expected_mode=mode,
             detail="not callable",
         )
 
     unwrapped = inspect.unwrap(function)
     synchronous = not inspect.iscoroutinefunction(unwrapped)
-    if not synchronous:
+    if synchronous != (mode == "sync"):
         return MethodCheck(
             name=name,
             present=True,
             callable=True,
-            synchronous=False,
+            synchronous=synchronous,
             signature_compatible=False,
-            detail="async method is not allowed",
+            expected_mode=mode,
+            detail=f"{('sync' if synchronous else 'async')} method is not valid in {mode} mode",
         )
 
     try:
@@ -119,16 +131,18 @@ def _check_method(adapter: object, name: str, arity: int) -> MethodCheck:
             name=name,
             present=True,
             callable=True,
-            synchronous=True,
+            synchronous=synchronous,
             signature_compatible=False,
+            expected_mode=mode,
             detail=f"incompatible signature: {exc}",
         )
     return MethodCheck(
         name=name,
         present=True,
         callable=True,
-        synchronous=True,
+        synchronous=synchronous,
         signature_compatible=True,
+        expected_mode=mode,
     )
 
 

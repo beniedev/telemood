@@ -22,7 +22,48 @@ Current pre-release metadata:
     Python: >=3.11
     runtime dependencies: none
 
-## 2. Model plan
+Finish with a short read-only report. Use `unknown` instead of guessing:
+
+    TELEMOOD CAPABILITY REPORT
+    Host runtime:            <framework and execution model>
+    Transport ownership:     <owner of client, token, update loop>
+    Boundary:                sync | async | mixed
+    Send methods found:      <existing entrypoints>
+    Sticker/callback routes: <paths | none>
+    Reaction subscriptions:  change=<yes|no|unknown>, count=<yes|no|unknown>
+    Usable now:              <bubble/reaction/sticker/choices subset>
+    Degraded or missing:     <item — reason>
+    Files to modify:         <list>
+    Authorization needed:    <exact next action>
+
+## 2. Authorization boundary
+
+Safe before live authorization:
+
+- read repository and host code, schemas, routes, permissions, and state-path
+  shape without opening secret values;
+- run synthetic unit tests and build a wheel from the checkout;
+- run `check_adapter`, which never invokes transport;
+- write the capability report.
+
+Explicit human authorization is required before installation, host code or
+configuration changes, live Telegram sends, restart/deployment, or any
+push/tag/release. If an action is not clearly read-only or checkout-local,
+treat it as authorization-required.
+
+## 3. Install
+
+After the owner authorizes changing the host Python environment, run from the
+checkout:
+
+    python -m pip install .
+    python -c "import telemood; print(telemood.__version__)"
+
+Expected version: `0.1.0`. Runtime dependencies are empty; normal Python
+build requirements may still be used while building the package. Prefer a
+normal install rather than adding the checkout to `sys.path`.
+
+## 4. Model plan
 
 The model returns JSON-compatible data only. It cannot choose a chat, user, thread, bot namespace, Telegram file_id, token, endpoint, or SDK object.
 
@@ -61,113 +102,157 @@ Parse first, then bind trusted host context:
             target=trusted_target,
             authorized_user_id=trusted_user_id,
             bot_namespace=trusted_bot_namespace,
+            callback_ttl_seconds=1800.0,
         ),
         sticker_catalog=sticker_catalog,
     )
 
 Binding automatically expands long bubble text with a conservative heuristic: paragraph, sentence, whitespace, then hard split. Expanded bubbles stay in their original position relative to reactions, stickers, and choices.
 
-Unknown versions, fields, action types, catalog IDs, and untrusted identifiers fail closed.
+Callback TTL is host-owned through `PlanContext` or
+`action_plan_to_reply(..., callback_ttl_seconds=...)`; model JSON cannot set
+it. Unknown versions, fields, action types, catalog IDs, and untrusted
+identifiers fail closed. MiniApp is not part of the v0.1 public API.
 
-## 3. Inject the existing transport
+## 5. Inject the existing transport
 
-Implement the four synchronous InteractionHost methods around the client the host already owns:
+Use the included injected-client adapter, or implement `InteractionHost`
+directly. The small facade below is complete and provider-neutral: each
+host-owned callable accepts keyword arguments and returns `InjectedResult`.
 
-    from telemood import DeliveryStatus, TransportReceipt
+    from telemood import InjectedResult, InjectedTelegramAdapter
 
-    class ExistingClientAdapter:
-        def __init__(self, existing_client):
-            self.client = existing_client
+    class ExistingClientFacade:
+        def __init__(self, *, send_message, set_reaction, send_sticker, send_choices):
+            self._send_message = send_message
+            self._set_reaction = set_reaction
+            self._send_sticker = send_sticker
+            self._send_choices = send_choices
 
-        def send_bubble(self, request_id, request):
-            result = self.client.send_message(request.target, request.text)
-            return TransportReceipt(
-                DeliveryStatus.VERIFIED,
-                provider_delivery_id=str(result.message_id),
-            )
+        def send_message(self, **kwargs):
+            return self._send_message(**kwargs)
 
-        def send_reaction(self, request_id, request):
-            ...
+        def set_reaction(self, **kwargs):
+            return self._set_reaction(**kwargs)
 
-        def send_sticker_sequence(self, request_id, request, parts):
-            # Return one TransportReceipt per attempted part, in order.
-            ...
+        def send_sticker(self, **kwargs):
+            return self._send_sticker(**kwargs)
 
-        def send_choices(self, request_id, request, callback_tokens):
-            ...
+        def send_choices(self, **kwargs):
+            return self._send_choices(**kwargs)
 
-This example is intentionally SDK-neutral. Do not return VERIFIED unless the provider explicitly confirmed the effect. Map explicit rejection to FAILED, an invalid result to UNKNOWN, and a timeout or uncertain side effect to UNCERTAIN.
+    facade = ExistingClientFacade(
+        send_message=host_send_message,
+        set_reaction=host_set_reaction,
+        send_sticker=host_send_sticker,
+        send_choices=host_send_choices,
+    )
+    adapter = InjectedTelegramAdapter(facade)
+
+Each `host_*` callable maps the existing client operation to
+`InjectedResult(accepted=..., provider_delivery_id=..., detail=...)`. An
+explicit acceptance becomes `VERIFIED`; an explicit rejection becomes
+`FAILED`; an invalid result becomes `UNKNOWN`; timeout or an exception with
+an uncertain side effect becomes `UNCERTAIN`. Never claim acceptance merely
+because a call returned.
+
+For an async host, provide four equivalent `async def` facade methods and use
+`AsyncInjectedTelegramAdapter` with `AsyncInteractionKernel`. Do not call
+`asyncio.run()` or `loop.run_until_complete()` inside an already running event
+loop, and do not create an event-loop bridge inside the adapter.
 
 Check shape without calling transport:
 
     from telemood import check_adapter
 
-    result = check_adapter(adapter)
+    result = check_adapter(adapter, mode="sync")  # use mode="async" for async
     assert result.ok
     assert result.static_only
     assert not result.live_delivery_verified
 
 Static conformance is not live Telegram verification.
 
-## 4. Incoming regular stickers
+For sticker sequences the adapter sends parts in order and stops on the first
+non-`VERIFIED` result. A short receipt sequence is valid only when its final
+receipt is non-`VERIFIED`; missing all-verified receipts, extra receipts, or
+receipts after a non-verified result are protocol errors.
 
-The host normalizes an incoming Telegram sticker and may attach logical media references. Core never downloads media and never receives the token.
+## 6. Incoming regular stickers
+
+The included normalizer accepts a Telegram Bot API update mapping. The host
+supplies the bot namespace and optional logical media references; Telemood
+never downloads media or receives the token.
 
     from telemood import (
-        IncomingSticker,
-        IncomingStickerEvent,
         SQLiteStickerCatalog,
-        StickerFormat,
-        StickerType,
         ingest_incoming_sticker,
+        normalize_incoming_sticker,
     )
 
     catalog = SQLiteStickerCatalog("state/stickers.sqlite3")
-    event = IncomingStickerEvent(
-        target=trusted_target,
-        sender_user_id=trusted_sender_id,
-        received_at=provider_timestamp,
-        sticker=IncomingSticker(
-            bot_namespace=trusted_bot_namespace,
-            file_id=provider_sticker.file_id,
-            file_unique_id=provider_sticker.file_unique_id,
-            type=StickerType.REGULAR,
-            format=StickerFormat.ANIMATED,
-            emoji=provider_sticker.emoji,
-            set_name=provider_sticker.set_name,
-            thumbnail_ref=host_thumbnail_ref,
-            media_ref=host_media_ref,
-        ),
+    event = normalize_incoming_sticker(
+        update,
+        bot_namespace=trusted_bot_namespace,
+        thumbnail_ref=host_thumbnail_ref,
+        media_ref=host_media_ref,
     )
-    model_view = ingest_incoming_sticker(event, catalog)
+    model_event = ingest_incoming_sticker(event, catalog)
 
-model_view contains the opaque catalog ID, normalized text, and optional logical media references. It never contains the reusable provider file_id. Without a media reference, its text explicitly says that image content was not attached.
+`model_event.sticker` contains the opaque catalog ID, normalized text, and
+optional logical media references. The event also reports sender kind, target
+role, thread presence, and occurrence time without exposing the reusable
+provider `file_id`. Without a media reference,
+`model_event.sticker.text` explicitly says image content was not attached;
+the model saw metadata, not the image.
 
 v0.1 accepts regular stickers in static, animated, or video format. mask and custom_emoji sticker types are rejected and are not cataloged.
 
-## 5. Incoming and outgoing reactions
+## 7. Incoming and outgoing reactions
 
 Reaction sending is disabled until the host supplies confirmed capabilities:
 
-    from telemood import InteractionCapabilities
+    from telemood import (
+        InteractionCapabilities,
+        normalize_incoming_reaction_change,
+        normalize_incoming_reaction_count,
+    )
 
     capabilities = InteractionCapabilities(
         can_send_reactions=True,
         can_receive_reaction_changes=True,
         can_receive_reaction_counts=True,
-        reaction_updates_subscribed=True,
+        message_reaction_subscribed=True,
+        message_reaction_count_subscribed=True,
         available_reactions=("👍", "👀"),
+        reaction_change_unavailable_reason=None,
+        reaction_count_unavailable_reason=None,
     )
 
-Use IncomingReactionChange for actor-bound old/new reaction sets. Use IncomingReactionCount for anonymous aggregate counts. ReactionValue represents emoji, custom_emoji, and paid; v0.1 accepts only ordinary emoji for execution. InteractionKernel.accept_incoming_reaction returns ReactionAcceptance with an explicit rejection reason instead of silently returning None.
+Normalize `message_reaction` and `message_reaction_count` updates separately:
+
+    change = normalize_incoming_reaction_change(update)
+    count = normalize_incoming_reaction_count(update)
+
+Change updates preserve actor and old/new reaction sets; count updates contain
+anonymous aggregates and may be delayed. Their subscription flags and
+unavailable reasons are independent. `ReactionValue` can represent emoji,
+custom emoji, and paid reactions; v0.1 execution accepts ordinary emoji only.
+`InteractionKernel.accept_incoming_reaction` returns an explicit acceptance or
+rejection reason and optional capability detail.
 
 Telegram reaction updates must be explicitly requested by the host and may require administrator permission. Bot-originated sends must not be synthesized as inbound updates.
 
-## 6. Callbacks and execution
+## 8. Callbacks and execution
 
-Use a host-owned durable callback store when callbacks must survive restarts:
+Use a host-owned durable callback store when callbacks must survive restarts.
+Choose the kernel matching the adapter:
 
-    from telemood import InteractionKernel, SQLiteCallbackStore
+    from telemood import (
+        AsyncInteractionKernel,
+        InteractionKernel,
+        SQLiteCallbackStore,
+        normalize_callback_query,
+    )
 
     kernel = InteractionKernel(
         adapter,
@@ -180,11 +265,35 @@ Use a host-owned durable callback store when callbacks must survive restarts:
         capabilities=capabilities,
     )
 
+    async_kernel = AsyncInteractionKernel(
+        async_adapter,
+        callbacks=SQLiteCallbackStore("state/callbacks.sqlite3"),
+        sticker_catalog=catalog,
+    )
+    async_receipt = await async_kernel.execute_reply(
+        reply,
+        request_id=trusted_request_id,
+        capabilities=capabilities,
+    )
+
 Actions run strictly in plan order. The kernel waits for each receipt and stops on FAILED, UNKNOWN, or UNCERTAIN. The plan receipt records action receipts, stop index, and unexecuted count. Sticker multi-part compatibility requests preserve every returned TransportReceipt.
 
-Choices bind callback handles to user/chat/thread, TTL, pending/active state, and one-shot consumption. Handles are limited to Telegram's 64 UTF-8 byte callback_data boundary.
+Choices bind callback handles to user/chat/thread, host-owned TTL,
+pending/active state, and one-shot consumption. Handles are limited to
+Telegram's 64 UTF-8 byte `callback_data` boundary. Normalize and consume a
+callback through the same kernel/store:
 
-## 7. Minimum offline verification
+    callback = normalize_callback_query(update)
+    resolution = kernel.consume_callback(
+        callback.token,
+        user_id=callback.user_id,
+        chat_id=callback.target.chat_id,
+        thread_id=callback.target.thread_id,
+    )
+
+## 9. Minimum offline verification
+
+Run these from the checkout before installation and repeat them after changes:
 
     python -m unittest discover -s tests -v
     python -m pip wheel . --no-deps -w dist

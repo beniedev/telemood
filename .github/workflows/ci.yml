@@ -16,8 +16,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -31,15 +31,45 @@ jobs:
         run: |
           python - <<'PY'
           import glob
+          import re
           import zipfile
 
           wheel, = glob.glob("dist/*.whl")
           with zipfile.ZipFile(wheel) as archive:
               names = archive.namelist()
-          forbidden = (".sqlite", ".sqlite3", ".env", ".pyc", "__pycache__")
-          leaked = [name for name in names if any(marker in name for marker in forbidden)]
+              payloads = {
+                  name: archive.read(name)
+                  for name in names
+                  if not name.endswith("/")
+              }
+          allowed_metadata = re.compile(
+              r"telemood-[^/]+\.dist-info/"
+              r"(?:METADATA|WHEEL|top_level\.txt|RECORD|licenses/LICENSE)$"
+          )
+          leaked = [
+              name
+              for name in names
+              if not (
+                  (name.startswith("telemood/") and name.endswith(".py"))
+                  or allowed_metadata.fullmatch(name)
+              )
+          ]
           if leaked:
               raise SystemExit(f"forbidden wheel entries: {leaked}")
+          secret_patterns = (
+              re.compile(rb"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b"),
+              re.compile(rb"[A-Za-z]:\\Users\\", re.IGNORECASE),
+              re.compile(rb"/(?:Users|home)/", re.IGNORECASE),
+              re.compile(rb"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"),
+              re.compile(rb"api\.telegram\.org/bot", re.IGNORECASE),
+          )
+          leaked_text = [
+              name
+              for name, payload in payloads.items()
+              if any(pattern.search(payload) for pattern in secret_patterns)
+          ]
+          if leaked_text:
+              raise SystemExit(f"sensitive wheel content: {leaked_text}")
           PY
 
       - name: Clean wheel install and import

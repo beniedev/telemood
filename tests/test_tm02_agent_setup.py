@@ -100,6 +100,37 @@ class ActionPlanContractTests(unittest.TestCase):
                 _plan(
                     {
                         "type": "choices",
+                        "prompt": "Pick",
+                        "options": [
+                            {"key": "yes", "label": "Yes"},
+                            {"key": "no", "label": "No"},
+                        ],
+                        "callback_ttl_seconds": 999999,
+                    }
+                )
+            )
+
+        reply = action_plan_to_reply(
+            _plan(
+                {
+                    "type": "choices",
+                    "prompt": "Pick",
+                    "options": [
+                        {"key": "yes", "label": "Yes"},
+                        {"key": "no", "label": "No"},
+                    ],
+                }
+            ),
+            _target(),
+            authorized_user_id="trusted-user",
+            callback_ttl_seconds=60,
+        )
+        self.assertEqual(reply.actions[0].callback_ttl_seconds, 60)
+        with self.assertRaises(ActionPlanError):
+            parse_interaction_plan(
+                _plan(
+                    {
+                        "type": "choices",
                         "prompt": "Too few",
                         "options": [{"key": "one", "label": "One"}],
                     }
@@ -185,7 +216,7 @@ class AdapterStaticChecksTests(unittest.TestCase):
         self.assertFalse(result.live_delivery_verified)
         self.assertTrue(all(method.passed for method in result.methods))
 
-    def test_adapter_check_rejects_missing_async_and_bad_signatures(self) -> None:
+    def test_adapter_check_selects_sync_or_async_mode(self) -> None:
         class Missing:
             pass
 
@@ -205,6 +236,9 @@ class AdapterStaticChecksTests(unittest.TestCase):
                 return None
 
         self.assertFalse(check_adapter(AsyncAdapter()).ok)
+        self.assertTrue(check_adapter(AsyncAdapter(), mode="async").ok)
+        with self.assertRaises(ValueError):
+            check_adapter(AsyncAdapter(), mode="threaded")
 
         class BadSignatures:
             def send_bubble(self, request_id):  # noqa: ARG002

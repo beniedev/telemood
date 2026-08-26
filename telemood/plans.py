@@ -62,7 +62,6 @@ class StickerPlanAction:
 class ChoicesPlanAction:
     prompt: str
     options: tuple[ChoiceOption, ...]
-    callback_ttl_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         _plan_text(self.prompt, "choice prompt")
@@ -73,15 +72,7 @@ class ChoicesPlanAction:
             raise ActionPlanError("choices options must contain ChoiceOption values")
         if len({option.key for option in options}) != len(options):
             raise ActionPlanError("choice keys must be unique")
-        if (
-            isinstance(self.callback_ttl_seconds, bool)
-            or not isinstance(self.callback_ttl_seconds, (int, float))
-            or not isfinite(float(self.callback_ttl_seconds))
-            or float(self.callback_ttl_seconds) <= 0
-        ):
-            raise ActionPlanError("callback_ttl_seconds must be positive and finite")
         object.__setattr__(self, "options", options)
-        object.__setattr__(self, "callback_ttl_seconds", float(self.callback_ttl_seconds))
 
 
 PlanAction = BubblePlanAction | ReactionPlanAction | StickerPlanAction | ChoicesPlanAction
@@ -116,6 +107,7 @@ class PlanContext:
     target: TargetRef
     authorized_user_id: str | None = None
     bot_namespace: str | None = None
+    callback_ttl_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, TargetRef):
@@ -124,6 +116,18 @@ class PlanContext:
             _plan_text(self.authorized_user_id, "authorized_user_id")
         if self.bot_namespace is not None:
             _plan_text(self.bot_namespace, "bot_namespace")
+        if (
+            isinstance(self.callback_ttl_seconds, bool)
+            or not isinstance(self.callback_ttl_seconds, (int, float))
+            or not isfinite(float(self.callback_ttl_seconds))
+            or float(self.callback_ttl_seconds) <= 0
+        ):
+            raise ValueError("callback_ttl_seconds must be positive and finite")
+        object.__setattr__(
+            self,
+            "callback_ttl_seconds",
+            float(self.callback_ttl_seconds),
+        )
 
 
 def parse_interaction_plan(data: str | Mapping[str, Any]) -> InteractionPlan:
@@ -192,7 +196,7 @@ def bind_interaction_plan(
                         prompt=action.prompt,
                         options=action.options,
                         authorized_user_id=context.authorized_user_id,
-                        callback_ttl_seconds=action.callback_ttl_seconds,
+                        callback_ttl_seconds=context.callback_ttl_seconds,
                     )
                 )
         except (TypeError, ValueError) as exc:
@@ -210,6 +214,7 @@ def action_plan_to_reply(
     bot_namespace: str | None = None,
     sticker_catalog: StickerCatalog | None = None,
     max_bubble_length: int = 4096,
+    callback_ttl_seconds: float = 1800.0,
 ) -> RichReply:
     """Convenience wrapper for parsing and trusted-context binding."""
 
@@ -219,6 +224,7 @@ def action_plan_to_reply(
             target=target,
             authorized_user_id=authorized_user_id,
             bot_namespace=bot_namespace,
+            callback_ttl_seconds=callback_ttl_seconds,
         ),
         sticker_catalog=sticker_catalog,
         max_bubble_length=max_bubble_length,
@@ -270,7 +276,7 @@ def _parse_action(raw_action: object, index: int) -> PlanAction:
     if action_type == "choices":
         _check_keys(
             raw_action,
-            {"type", "prompt", "options", "callback_ttl_seconds"},
+            {"type", "prompt", "options"},
             required={"type", "prompt", "options"},
             context=f"action {index}",
         )
@@ -299,7 +305,6 @@ def _parse_action(raw_action: object, index: int) -> PlanAction:
         return ChoicesPlanAction(
             prompt=_string(raw_action["prompt"], "choice prompt"),
             options=tuple(options),
-            callback_ttl_seconds=raw_action.get("callback_ttl_seconds", 1800.0),
         )
     raise ActionPlanError(f"action {index} has an unknown type")
 

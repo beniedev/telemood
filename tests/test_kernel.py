@@ -10,7 +10,6 @@ from telemood import (
     DeliveryStatus,
     InteractionCapabilities,
     InteractionKernel,
-    MiniAppRequest,
     ReactionRequest,
     StickerRequest,
     TargetRef,
@@ -35,15 +34,11 @@ class FakeHost:
         self.reaction_result: object = TransportReceipt(DeliveryStatus.VERIFIED, "reaction-1")
         self.choices_result = TransportReceipt(DeliveryStatus.VERIFIED, "choices-1")
         self.sticker_result: object = [TransportReceipt(DeliveryStatus.VERIFIED, "sticker-1")]
-        self.miniapp_result = TransportReceipt(DeliveryStatus.VERIFIED, "miniapp-1")
         self.choice_tokens = {}
-        self.miniapp_token = None
         self.reaction_request_ids = []
         self.choices_request_ids = []
         self.sticker_request_ids = []
-        self.miniapp_request_ids = []
         self.advance_choices_before_return = 0.0
-        self.advance_miniapp_before_return = 0.0
 
     def send_reaction(self, request_id, request):
         self.reaction_request_ids.append(request_id)
@@ -64,14 +59,6 @@ class FakeHost:
         if isinstance(self.sticker_result, BaseException):
             raise self.sticker_result
         return self.sticker_result
-
-    def send_miniapp(self, request_id, request, callback_token):
-        self.miniapp_request_ids.append(request_id)
-        self.miniapp_token = callback_token
-        self.clock.advance(self.advance_miniapp_before_return)
-        if isinstance(self.miniapp_result, BaseException):
-            raise self.miniapp_result
-        return self.miniapp_result
 
 
 def target() -> TargetRef:
@@ -188,6 +175,7 @@ class InteractionKernelTests(unittest.TestCase):
         ]
         uncertain = self.kernel.send_sticker(request, request_id="sticker-uncertain")
         self.assertEqual(uncertain.status, DeliveryStatus.UNCERTAIN)
+        self.assertEqual(uncertain.detail, "transport_continued_after_non_verified")
         self.assertEqual(
             uncertain.part_statuses,
             (DeliveryStatus.VERIFIED, DeliveryStatus.UNCERTAIN, DeliveryStatus.VERIFIED),
@@ -212,26 +200,6 @@ class InteractionKernelTests(unittest.TestCase):
         self.assertEqual(
             self.host.sticker_request_ids,
             ["sticker-uncertain", "sticker-complete"],
-        )
-
-    def test_miniapp_callback_is_active_only_after_verified_delivery(self) -> None:
-        request = MiniAppRequest(target(), "app-ref", "Open", "user-1", 5.0)
-        receipt = self.kernel.send_miniapp(request, request_id="miniapp-request")
-        self.assertTrue(receipt.verified_visible_completion)
-        self.assertEqual(self.host.miniapp_request_ids, ["miniapp-request"])
-        accepted = self.kernel.consume_callback(
-            receipt.callback_tokens[0], user_id="user-1", chat_id="chat-1"
-        )
-        self.assertTrue(accepted.accepted)
-        self.assertEqual(accepted.payload.value, "app-ref")
-
-        self.host.miniapp_result = TransportReceipt(DeliveryStatus.UNCERTAIN)
-        uncertain = self.kernel.send_miniapp(request, request_id="miniapp-uncertain")
-        self.assertFalse(uncertain.verified_visible_completion)
-        self.assertEqual(uncertain.callback_tokens, ())
-        self.assertEqual(
-            self.host.miniapp_request_ids,
-            ["miniapp-request", "miniapp-uncertain"],
         )
 
     def test_host_exception_and_invalid_sequence_fail_closed(self) -> None:
@@ -267,7 +235,7 @@ class InteractionKernelTests(unittest.TestCase):
         self.assertEqual(unknown.status, DeliveryStatus.UNKNOWN)
         self.assertFalse(unknown.verified_visible_completion)
 
-    def test_sticker_receipt_count_must_match_parts(self) -> None:
+    def test_sticker_sequence_allows_only_valid_early_stop(self) -> None:
         request = StickerRequest(target(), "sticker-ref", "before", "after")
 
         self.host.sticker_result = [
@@ -276,6 +244,7 @@ class InteractionKernelTests(unittest.TestCase):
         ]
         fewer = self.kernel.send_sticker(request, request_id="sticker-fewer")
         self.assertEqual(fewer.status, DeliveryStatus.UNKNOWN)
+        self.assertEqual(fewer.detail, "transport_sequence_incomplete")
         self.assertFalse(fewer.verified_visible_completion)
         self.assertEqual(
             tuple(receipt.provider_delivery_id for receipt in fewer.part_receipts),
@@ -289,6 +258,7 @@ class InteractionKernelTests(unittest.TestCase):
         ]
         partial = self.kernel.send_sticker(request, request_id="sticker-partial")
         self.assertEqual(partial.status, DeliveryStatus.FAILED)
+        self.assertEqual(partial.detail, "provider-rejected")
         self.assertEqual(partial.part_receipts[0].provider_delivery_id, "before")
         self.assertEqual(partial.part_receipts[1].detail, "provider-rejected")
         self.assertEqual(partial.unexecuted_parts, 1)
@@ -301,6 +271,9 @@ class InteractionKernelTests(unittest.TestCase):
         ]
         more = self.kernel.send_sticker(request, request_id="sticker-more")
         self.assertEqual(more.status, DeliveryStatus.UNKNOWN)
+        self.assertEqual(more.detail, "transport_sequence_too_long")
+        self.assertEqual(len(more.part_receipts), 3)
+        self.assertEqual(more.total_parts, 3)
         self.assertFalse(more.verified_visible_completion)
 
     def test_verified_choices_with_expired_callbacks_become_uncertain(self) -> None:
@@ -318,24 +291,6 @@ class InteractionKernelTests(unittest.TestCase):
         self.assertEqual(receipt.detail, "delivered_but_callback_activation_failed")
         self.assertEqual(receipt.callback_tokens, ())
         self.assertFalse(receipt.verified_visible_completion)
-
-    def test_verified_miniapp_with_expired_callback_becomes_uncertain(self) -> None:
-        self.host.advance_miniapp_before_return = 2.0
-        self.host.miniapp_result = TransportReceipt(
-            DeliveryStatus.VERIFIED,
-            "miniapp-delivered",
-        )
-        receipt = self.kernel.send_miniapp(
-            MiniAppRequest(target(), "app-ref", "Open", "user-1", 2.0),
-            request_id="miniapp-activation-failure",
-        )
-
-        self.assertEqual(receipt.status, DeliveryStatus.UNCERTAIN)
-        self.assertEqual(receipt.provider_delivery_id, "miniapp-delivered")
-        self.assertEqual(receipt.detail, "delivered_but_callback_activation_failed")
-        self.assertEqual(receipt.callback_tokens, ())
-        self.assertFalse(receipt.verified_visible_completion)
-
 
 if __name__ == "__main__":
     unittest.main()

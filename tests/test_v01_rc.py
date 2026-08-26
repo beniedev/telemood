@@ -176,9 +176,13 @@ class StickerInboundTests(unittest.TestCase):
                         ),
                         catalog,
                     )
-                    self.assertTrue(view.catalog_id.startswith("sticker_"))
-                    self.assertIn(sticker_format.value, view.text)
-                    self.assertIn("image content not attached", view.text)
+                    self.assertTrue(view.sticker.catalog_id.startswith("sticker_"))
+                    self.assertIn(sticker_format.value, view.sticker.text)
+                    self.assertIn("image content not attached", view.sticker.text)
+                    self.assertEqual(view.sender_kind.value, "user")
+                    self.assertEqual(view.target_role, "telegram")
+                    self.assertTrue(view.in_thread)
+                    self.assertEqual(view.occurred_at, 100)
                     self.assertNotIn(raw_file_id, repr(view))
             self.assertEqual(len(catalog.list("bot-a")), 3)
 
@@ -243,7 +247,8 @@ class ReactionContractTests(unittest.TestCase):
         self.capabilities = InteractionCapabilities(
             can_receive_reaction_changes=True,
             can_receive_reaction_counts=True,
-            reaction_updates_subscribed=True,
+            message_reaction_subscribed=True,
+            message_reaction_count_subscribed=True,
         )
 
     def test_change_preserves_old_new_sets_and_actor_chat(self) -> None:
@@ -286,6 +291,19 @@ class ReactionContractTests(unittest.TestCase):
         )
         self.assertTrue(accepted_count.accepted)
         self.assertTrue(accepted_count.event.delayed)
+
+        change_only = InteractionCapabilities(
+            can_receive_reaction_changes=True,
+            can_receive_reaction_counts=True,
+            message_reaction_subscribed=True,
+            reaction_count_unavailable_reason="count updates not requested",
+        )
+        self.assertTrue(
+            InteractionKernel.accept_incoming_reaction(removal, change_only).accepted
+        )
+        rejected_count = InteractionKernel.accept_incoming_reaction(count, change_only)
+        self.assertEqual(rejected_count.reason, ReactionRejection.UPDATES_NOT_SUBSCRIBED)
+        self.assertEqual(rejected_count.detail, "count updates not requested")
 
     def test_unsupported_and_unavailable_reasons_are_explicit(self) -> None:
         for value in (

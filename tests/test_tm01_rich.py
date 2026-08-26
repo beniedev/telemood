@@ -21,7 +21,6 @@ from telemood import (
     InteractionKind,
     InteractionKernel,
     InteractionReceipt,
-    MiniAppRequest,
     ReactionActor,
     ReactionRejection,
     ReactionRequest,
@@ -75,10 +74,6 @@ class RichHost:
     def send_choices(self, request_id, request, callback_tokens):
         self.events.append(("choices", request_id))
         return self.choices_result
-
-    def send_miniapp(self, request_id, request, callback_token):
-        self.events.append(("miniapp", request_id))
-        return TransportReceipt(DeliveryStatus.VERIFIED, "miniapp")
 
 
 def _consume_in_process(path: str, token_value: str, results) -> None:
@@ -213,7 +208,7 @@ class RichInteractionTests(unittest.TestCase):
 
         capabilities = InteractionCapabilities(
             can_receive_reaction_changes=True,
-            reaction_updates_subscribed=True,
+            message_reaction_subscribed=True,
         )
         user_event = IncomingReactionChange(
             target(),
@@ -243,14 +238,6 @@ class RichInteractionTests(unittest.TestCase):
             kernel.accept_incoming_reaction(user_event, not_subscribed).reason,
             ReactionRejection.UPDATES_NOT_SUBSCRIBED,
         )
-
-        host.send_miniapp = None
-        missing_miniapp = kernel.send_miniapp(
-            MiniAppRequest(target(), "app-ref", "Open", "user"),
-            request_id="miniapp-unavailable",
-        )
-        self.assertEqual(missing_miniapp.status, DeliveryStatus.FAILED)
-        self.assertEqual(missing_miniapp.detail, "miniapp_capability_unavailable")
 
     def test_sticker_catalog_is_namespace_scoped_and_send_seen_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

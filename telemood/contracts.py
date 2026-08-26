@@ -50,7 +50,6 @@ class InteractionKind(str, Enum):
     REACTION = "reaction"
     CHOICES = "choices"
     STICKER = "sticker"
-    MINIAPP = "miniapp"
 
 
 class DeliveryStatus(str, Enum):
@@ -136,16 +135,20 @@ class InteractionCapabilities:
     can_send_reactions: bool = False
     can_receive_reaction_changes: bool = False
     can_receive_reaction_counts: bool = False
-    reaction_updates_subscribed: bool = False
+    message_reaction_subscribed: bool = False
+    message_reaction_count_subscribed: bool = False
     available_reactions: tuple[str, ...] | None = None
     reaction_unavailable_reason: str | None = None
+    reaction_change_unavailable_reason: str | None = None
+    reaction_count_unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
             "can_send_reactions",
             "can_receive_reaction_changes",
             "can_receive_reaction_counts",
-            "reaction_updates_subscribed",
+            "message_reaction_subscribed",
+            "message_reaction_count_subscribed",
         ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"{field_name} must be bool")
@@ -157,11 +160,22 @@ class InteractionCapabilities:
                 raise ValueError("available_reactions must be unique")
             object.__setattr__(self, "available_reactions", values)
         _optional_text(self.reaction_unavailable_reason, "reaction_unavailable_reason")
+        _optional_text(
+            self.reaction_change_unavailable_reason,
+            "reaction_change_unavailable_reason",
+        )
+        _optional_text(
+            self.reaction_count_unavailable_reason,
+            "reaction_count_unavailable_reason",
+        )
 
     @property
     def inbound_reactions_available(self) -> bool:
-        return self.reaction_updates_subscribed and (
-            self.can_receive_reaction_changes or self.can_receive_reaction_counts
+        return (
+            self.can_receive_reaction_changes and self.message_reaction_subscribed
+        ) or (
+            self.can_receive_reaction_counts
+            and self.message_reaction_count_subscribed
         )
 
     def can_send_emoji(self, emoji: str) -> bool:
@@ -284,6 +298,7 @@ class ReactionAcceptance:
     accepted: bool
     event: ReactionEvent | None = None
     reason: ReactionRejection | None = None
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.accepted, bool):
@@ -293,6 +308,8 @@ class ReactionAcceptance:
                 raise ValueError("accepted reaction must contain an event")
             if self.reason is not None:
                 raise ValueError("accepted reaction cannot contain a rejection reason")
+            if self.detail is not None:
+                raise ValueError("accepted reaction cannot contain rejection detail")
         else:
             if self.event is not None:
                 raise ValueError("rejected reaction cannot contain an event")
@@ -301,6 +318,7 @@ class ReactionAcceptance:
             except (TypeError, ValueError) as exc:
                 raise ValueError("rejected reaction requires a valid reason") from exc
             object.__setattr__(self, "reason", reason)
+            _optional_text(self.detail, "reaction rejection detail")
 
 
 @dataclass(frozen=True)
@@ -498,6 +516,40 @@ class StickerModelView:
             _logical_ref(self.media_ref, "media_ref")
 
 
+class StickerSenderKind(str, Enum):
+    USER = "user"
+    CHAT = "chat"
+
+
+@dataclass(frozen=True)
+class StickerModelEvent:
+    """Safe sticker projection with context but without provider identifiers."""
+
+    sticker: StickerModelView
+    sender_kind: StickerSenderKind
+    target_role: str
+    in_thread: bool
+    occurred_at: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sticker, StickerModelView):
+            raise ValueError("sticker must be StickerModelView")
+        try:
+            sender_kind = StickerSenderKind(self.sender_kind)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid sticker sender kind") from exc
+        object.__setattr__(self, "sender_kind", sender_kind)
+        _required_text(self.target_role, "target_role")
+        if not isinstance(self.in_thread, bool):
+            raise ValueError("in_thread must be bool")
+        if (
+            not isinstance(self.occurred_at, int)
+            or isinstance(self.occurred_at, bool)
+            or self.occurred_at < 0
+        ):
+            raise ValueError("occurred_at must be a non-negative integer timestamp")
+
+
 @dataclass(frozen=True)
 class StickerPart:
     kind: StickerPartKind
@@ -533,37 +585,6 @@ class StickerRequest:
         if self.text_after:
             parts.append(StickerPart(StickerPartKind.TEXT, self.text_after))
         return tuple(parts)
-
-
-@dataclass(frozen=True)
-class MiniAppRequest:
-    target: TargetRef
-    app_ref: str
-    button_label: str
-    authorized_user_id: str
-    callback_ttl_seconds: float = 1800.0
-    authorized_thread_id: str | None = None
-
-    def __post_init__(self) -> None:
-        _logical_ref(self.app_ref, "app_ref")
-        _required_text(self.button_label, "button_label")
-        _required_text(self.authorized_user_id, "authorized_user_id")
-        _optional_text(self.authorized_thread_id, "authorized_thread_id")
-        if (
-            self.authorized_thread_id is not None
-            and self.target.thread_id is not None
-            and self.authorized_thread_id != self.target.thread_id
-        ):
-            raise ValueError("authorized_thread_id must match target.thread_id")
-        object.__setattr__(
-            self,
-            "callback_ttl_seconds",
-            _positive_finite(self.callback_ttl_seconds, "callback_ttl_seconds"),
-        )
-
-    @property
-    def callback_thread_id(self) -> str | None:
-        return self.authorized_thread_id or self.target.thread_id
 
 
 RichAction = BubbleRequest | ReactionRequest | StickerRequest | ChoicesRequest
@@ -780,14 +801,38 @@ class InteractionHost(Protocol):
         """Send in order, stop on non-verified, and return attempted receipts."""
         ...
 
-@runtime_checkable
-class MiniAppHost(Protocol):
-    """Optional legacy mini-app adapter; not required by the v0.1 core."""
 
-    def send_miniapp(
+@runtime_checkable
+class AsyncInteractionHost(Protocol):
+    """Async counterpart for hosts that already own an event loop."""
+
+    async def send_reaction(
         self,
         request_id: str,
-        request: MiniAppRequest,
-        callback_token: CallbackToken,
+        request: ReactionRequest,
     ) -> TransportReceipt:
+        ...
+
+    async def send_bubble(
+        self,
+        request_id: str,
+        request: BubbleRequest,
+    ) -> TransportReceipt:
+        ...
+
+    async def send_choices(
+        self,
+        request_id: str,
+        request: ChoicesRequest,
+        callback_tokens: Mapping[str, CallbackToken],
+    ) -> TransportReceipt:
+        ...
+
+    async def send_sticker_sequence(
+        self,
+        request_id: str,
+        request: StickerRequest,
+        parts: Sequence[StickerPart],
+    ) -> Sequence[TransportReceipt]:
+        """Send in order, stop on non-verified, and return attempted receipts."""
         ...
