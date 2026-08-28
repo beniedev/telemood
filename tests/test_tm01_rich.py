@@ -327,6 +327,7 @@ class SQLiteCallbackTests(unittest.TestCase):
                 payload=CallbackPayload(InteractionKind.CHOICES, "reply", "yes"),
                 ttl_seconds=10,
             )
+            self.assertEqual(token.expires_at, 110.0)
             self.assertTrue(first.activate(token))
 
             barrier = threading.Barrier(2)

@@ -6,7 +6,7 @@ transport and returns a small, explicit receipt to the interaction kernel.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
 from typing import Mapping, Protocol, Sequence, runtime_checkable
@@ -614,14 +614,21 @@ class RichReply:
 
 @dataclass(frozen=True)
 class CallbackToken:
-    """Opaque callback handle.  The host decides how it reaches a user."""
+    """Opaque handle with optional Unix expiry metadata for host-owned UX."""
 
     value: str
+    expires_at: float | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         _required_text(self.value, "callback token")
         if len(self.value.encode("utf-8")) > 64:
             raise ValueError("callback token exceeds Telegram's 64-byte limit")
+        if self.expires_at is not None:
+            object.__setattr__(
+                self,
+                "expires_at",
+                _positive_finite(self.expires_at, "callback expiry"),
+            )
 
 
 @dataclass(frozen=True)
@@ -710,6 +717,16 @@ class InteractionReceipt:
     @property
     def unexecuted_parts(self) -> int:
         return self.total_parts - len(self.part_receipts)
+
+    @property
+    def callback_expires_at(self) -> float | None:
+        """Earliest absolute expiry exposed by the active callback handles."""
+        if not self.callback_tokens:
+            return None
+        deadlines = tuple(token.expires_at for token in self.callback_tokens)
+        if any(deadline is None for deadline in deadlines):
+            return None
+        return min(deadline for deadline in deadlines if deadline is not None)
 
 
 @dataclass(frozen=True)

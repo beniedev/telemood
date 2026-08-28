@@ -258,6 +258,17 @@ Choices callback 绑定 user/chat/thread、宿主持有的 TTL、pending/active 
         thread_id=callback.target.thread_id,
     )
 
+成功创建 choices 后，`InteractionReceipt.callback_expires_at` 会给出所有
+active callback handle 中最早的绝对 Unix 到期时间。宿主可将它与
+`provider_delivery_id` 交给自己已有的 scheduler 和 Telegram client，按时移除或
+禁用过期的 reply markup；Telemood 自身不会启动 scheduler、线程、event loop
+或第二个 client。
+
+Callback store 仍是到期安全判断的唯一权威：即使界面清理尚未执行或执行失败，
+过期点击也会 fail closed。已有自定义 `CallbackStore` 继续返回
+`CallbackToken(value)` 即可兼容；只有同时填写可选的 `expires_at` 元数据时，
+receipt 才会提供对应到期时间，否则为 `None`。
+
 ## 9. 最小离线验证
 
 安装前先在仓库检出中运行，修改后再重复：
