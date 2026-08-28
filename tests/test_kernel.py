@@ -83,7 +83,11 @@ class InteractionKernelTests(unittest.TestCase):
         self.token_index = 0
         from telemood import CallbackRegistry
 
-        self.registry = CallbackRegistry(clock=self.clock, token_factory=self._token)
+        self.registry = CallbackRegistry(
+            clock=self.clock,
+            deadline_clock=self.clock,
+            token_factory=self._token,
+        )
         self.kernel = InteractionKernel(
             self.host,
             callbacks=self.registry,
@@ -130,6 +134,7 @@ class InteractionKernelTests(unittest.TestCase):
             self.assertEqual(receipt.status, status)
             self.assertFalse(receipt.verified_visible_completion)
             self.assertEqual(receipt.callback_tokens, ())
+            self.assertIsNone(receipt.callback_expires_at)
             self.assertEqual(self.host.choices_request_ids[-1], receipt.request_id)
             token = next(iter(self.host.choice_tokens.values()))
             resolution = self.kernel.consume_callback(
@@ -144,6 +149,10 @@ class InteractionKernelTests(unittest.TestCase):
         receipt = self.kernel.send_choices(choices_request(), request_id="choices-request")
         token = receipt.callback_tokens[0]
         self.assertEqual(self.host.choices_request_ids, ["choices-request"])
+        self.assertEqual(receipt.callback_expires_at, 110.0)
+        self.assertTrue(
+            all(value.expires_at == 110.0 for value in receipt.callback_tokens)
+        )
 
         wrong_user = self.kernel.consume_callback(token, user_id="other", chat_id="chat-1")
         self.assertEqual(wrong_user.reason, CallbackRejection.USER_MISMATCH)
@@ -161,6 +170,7 @@ class InteractionKernelTests(unittest.TestCase):
             choices_request(ttl=2.0), request_id="choices-expiring"
         )
         token = receipt.callback_tokens[0]
+        self.assertEqual(receipt.callback_expires_at, 102.0)
         self.clock.advance(2.0)
 
         expired = self.kernel.consume_callback(token, user_id="user-1", chat_id="chat-1")

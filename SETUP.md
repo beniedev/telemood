@@ -296,6 +296,18 @@ callback through the same kernel/store:
         thread_id=callback.target.thread_id,
     )
 
+A successful choices `InteractionReceipt` exposes `callback_expires_at`, the
+earliest absolute Unix expiry supplied by its active callback handles. The host
+can combine that deadline with `provider_delivery_id` and its existing
+scheduler/Telegram client to remove or disable the stale reply markup. Telemood
+does not start a scheduler, thread, event loop, or second client.
+
+Expiry enforcement remains in the callback store: a stale press still fails
+closed even when visual cleanup has not run or fails. Custom `CallbackStore`
+implementations remain compatible when they return `CallbackToken(value)`;
+their receipt expiry is `None` unless they also populate the token's optional
+`expires_at` metadata.
+
 ## 9. Minimum offline verification
 
 Run these from the checkout before installation and repeat them after changes:

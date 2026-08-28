@@ -114,12 +114,14 @@ class CallbackRegistry:
         self,
         *,
         clock: Callable[[], float] = monotonic,
+        deadline_clock: Callable[[], float] = time,
         token_factory: Callable[[], str] | None = None,
         max_entries: int = 1024,
     ) -> None:
         if max_entries <= 0:
             raise ValueError("max_entries must be positive")
         self._clock = clock
+        self._deadline_clock = deadline_clock
         self._token_factory = token_factory or (lambda: uuid4().hex)
         self._max_entries = max_entries
         self._lock = RLock()
@@ -157,7 +159,11 @@ class CallbackRegistry:
             self._purge_expired_locked()
             if len(self._entries) >= self._max_entries:
                 raise ValueError("callback registry full")
-            token = CallbackToken(self._token_factory())
+            ttl = float(ttl_seconds)
+            token = CallbackToken(
+                self._token_factory(),
+                expires_at=self._deadline_clock() + ttl,
+            )
             if token.value in self._entries:
                 raise ValueError("callback token collision")
             self._entries[token.value] = _CallbackEntry(
@@ -165,7 +171,7 @@ class CallbackRegistry:
                 user_id=user_id,
                 chat_id=chat_id,
                 payload=payload,
-                expires_at=self._clock() + float(ttl_seconds),
+                expires_at=self._clock() + ttl,
                 thread_id=thread_id,
             )
             return token
@@ -348,7 +354,8 @@ class SQLiteCallbackStore:
             if count >= self._max_entries:
                 connection.rollback()
                 raise ValueError("callback store full")
-            token = CallbackToken(self._token_factory())
+            expires_at = now + float(ttl_seconds)
+            token = CallbackToken(self._token_factory(), expires_at=expires_at)
             try:
                 connection.execute(
                     """
@@ -365,7 +372,7 @@ class SQLiteCallbackStore:
                         payload.kind.value,
                         payload.request_id,
                         payload.value,
-                        now + float(ttl_seconds),
+                        expires_at,
                     ),
                 )
             except sqlite3.IntegrityError as exc:

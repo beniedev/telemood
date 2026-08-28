@@ -35,7 +35,8 @@ class _BulkStore:
         )
 
     def register(self, **kwargs):
-        return self.registry.register(**kwargs)
+        token = self.registry.register(**kwargs)
+        return CallbackToken(token.value)
 
     def activate_all(self, tokens):
         return all(self.registry.activate(token) for token in tokens)
@@ -80,6 +81,7 @@ class PublicContractTests(unittest.TestCase):
         receipt = kernel.send_choices(request, request_id="request")
         self.assertEqual(receipt.status, DeliveryStatus.VERIFIED)
         self.assertEqual(len(receipt.callback_tokens), 2)
+        self.assertIsNone(receipt.callback_expires_at)
         resolved = store.consume(
             receipt.callback_tokens[0],
             user_id="user",

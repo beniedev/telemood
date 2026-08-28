@@ -7,6 +7,7 @@ from telemood import (
     AsyncInjectedTelegramAdapter,
     AsyncInteractionKernel,
     BubbleRequest,
+    CallbackRegistry,
     CallbackToken,
     ChoiceOption,
     ChoicesRequest,
@@ -215,6 +216,29 @@ class AsyncFakeInjectedClient(FakeInjectedClient):
 
 
 class AsyncAdapterConformanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_choices_expose_the_same_expiry_metadata(self) -> None:
+        client = AsyncFakeInjectedClient()
+        clock = lambda: 100.0
+        kernel = AsyncInteractionKernel(
+            AsyncInjectedTelegramAdapter(client),
+            callbacks=CallbackRegistry(
+                clock=clock,
+                deadline_clock=clock,
+                token_factory=iter(("token-a", "token-b")).__next__,
+            ),
+        )
+        request = ChoicesRequest(
+            _target(),
+            "Choose",
+            (ChoiceOption("yes", "Yes"), ChoiceOption("no", "No")),
+            "user-1",
+            callback_ttl_seconds=5.0,
+        )
+
+        receipt = await kernel.send_choices(request, request_id="async-choices")
+
+        self.assertEqual(receipt.callback_expires_at, 105.0)
+
     async def test_async_kernel_awaits_host_and_preserves_order(self) -> None:
         client = AsyncFakeInjectedClient()
         adapter = AsyncInjectedTelegramAdapter(client)
