@@ -77,11 +77,12 @@ from .stickers import (
     SQLiteStickerCatalog,
     StickerCatalog,
     ingest_incoming_sticker,
+    list_sticker_model_views,
     sticker_catalog_id,
 )
 from .text import split_semantic_bubbles
 
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0"
 
 __all__ = [
     "ActionPlanError",
@@ -149,6 +150,7 @@ __all__ = [
     "bind_interaction_plan",
     "check_adapter",
     "ingest_incoming_sticker",
+    "list_sticker_model_views",
     "normalize_callback_query",
     "normalize_incoming_reaction_change",
     "normalize_incoming_reaction_count",

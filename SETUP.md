@@ -15,7 +15,7 @@ Inspect the host read-only and confirm:
 
 Do not read or copy the bot token. Do not create a second client or update loop.
 
-Current pre-release metadata:
+Current release metadata:
 
     distribution: telemood
     import: telemood
@@ -59,7 +59,7 @@ checkout:
     python -m pip install .
     python -c "import telemood; print(telemood.__version__)"
 
-Expected version: `0.1.0rc1`. Runtime dependencies are empty; normal Python
+Expected version: `0.1.0`. Runtime dependencies are empty; normal Python
 build requirements may still be used while building the package. Prefer a
 normal install rather than adding the checkout to `sys.path`.
 
@@ -182,15 +182,17 @@ non-`VERIFIED` result. A short receipt sequence is valid only when its final
 receipt is non-`VERIFIED`; missing all-verified receipts, extra receipts, or
 receipts after a non-verified result are protocol errors.
 
-## 6. Incoming regular stickers
+## 6. User-created regular sticker round trip
 
 The included normalizer accepts a Telegram Bot API update mapping. The host
-supplies the bot namespace and optional logical media references; Telemood
-never downloads media or receives the token.
+uses its existing Telegram client to obtain any visual media, then supplies the
+bot namespace and optional logical media references. Telemood never downloads
+media or receives the token.
 
     from telemood import (
         SQLiteStickerCatalog,
         ingest_incoming_sticker,
+        list_sticker_model_views,
         normalize_incoming_sticker,
     )
 
@@ -202,6 +204,10 @@ never downloads media or receives the token.
         media_ref=host_media_ref,
     )
     model_event = ingest_incoming_sticker(event, catalog)
+    available_stickers = list_sticker_model_views(
+        catalog,
+        trusted_bot_namespace,
+    )
 
 `model_event.sticker` contains the opaque catalog ID, normalized text, and
 optional logical media references. The event also reports sender kind, target
@@ -210,7 +216,24 @@ provider `file_id`. Without a media reference,
 `model_event.sticker.text` explicitly says image content was not attached;
 the model saw metadata, not the image.
 
-v0.1 accepts regular stickers in static, animated, or video format. mask and custom_emoji sticker types are rejected and are not cataloged.
+Give the model `model_event` and, when it needs to choose from remembered
+stickers, `available_stickers`. Never pass `catalog.list(...)` to the model;
+those trusted storage rows contain reusable provider IDs. To send a sticker
+again, the model places its safe `catalog_id` in the catalog sticker action
+described in section 4. Plan binding resolves that ID only inside the trusted
+`bot_namespace`; an unknown ID or an ID from another namespace fails closed.
+The existing host adapter performs the actual send and returns the delivery
+receipt.
+
+Telemood does not create or modify sticker packs. A user creates and maintains
+their regular pack with Telegram's in-app Sticker Editor or the `@Stickers`
+Mini App, then sends a sticker to the host so it can be cataloged. See
+[Telegram's sticker guide](https://core.telegram.org/stickers). Do not place
+pack names, artwork, private moods, or provider `file_id` values in public
+configuration or model plans.
+
+v0.1 accepts regular stickers in static, animated, or video format. Mask and
+`custom_emoji` sticker types are rejected and are not cataloged.
 
 ## 7. Incoming and outgoing reactions
 

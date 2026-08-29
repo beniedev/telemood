@@ -236,20 +236,8 @@ def ingest_incoming_sticker(
     if not isinstance(catalog, StickerCatalog):
         raise TypeError("catalog must implement StickerCatalog")
     stored = catalog.remember(event.sticker)
-    details = [f"Incoming {stored.format.value} regular sticker"]
-    if stored.emoji:
-        details.append(f"emoji {stored.emoji}")
-    if stored.set_name:
-        details.append(f"set {stored.set_name}")
-    if stored.thumbnail_ref is None and stored.media_ref is None:
-        details.append("image content not attached")
     return StickerModelEvent(
-        sticker=StickerModelView(
-            catalog_id=stored.catalog_id,
-            text="; ".join(details),
-            thumbnail_ref=stored.thumbnail_ref,
-            media_ref=stored.media_ref,
-        ),
+        sticker=_model_view(stored),
         sender_kind=(
             StickerSenderKind.USER
             if event.sender_user_id is not None
@@ -258,6 +246,33 @@ def ingest_incoming_sticker(
         target_role=event.target.channel,
         in_thread=event.target.thread_id is not None,
         occurred_at=event.received_at,
+    )
+
+
+def list_sticker_model_views(
+    catalog: StickerCatalog,
+    bot_namespace: str,
+) -> tuple[StickerModelView, ...]:
+    """Return the bot-scoped sticker catalog without reusable provider ids."""
+
+    if not isinstance(catalog, StickerCatalog):
+        raise TypeError("catalog must implement StickerCatalog")
+    return tuple(_model_view(sticker) for sticker in catalog.list(bot_namespace))
+
+
+def _model_view(stored: RegularSticker) -> StickerModelView:
+    details = [f"{stored.format.value} regular sticker"]
+    if stored.emoji:
+        details.append(f"emoji {stored.emoji}")
+    if stored.set_name:
+        details.append(f"set {stored.set_name}")
+    if stored.thumbnail_ref is None and stored.media_ref is None:
+        details.append("image content not attached")
+    return StickerModelView(
+        catalog_id=stored.catalog_id,
+        text="; ".join(details),
+        thumbnail_ref=stored.thumbnail_ref,
+        media_ref=stored.media_ref,
     )
 
 
