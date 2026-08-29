@@ -4,7 +4,7 @@
 
 This is the user-side step that comes before Telemood's sticker round trip. Telegram creates and manages the pack; Telemood starts working after someone sends one of its stickers to the integrated bot.
 
-This guide covers **regular stickers made from your own images**. It does not cover masks or custom emoji.
+This guide covers **regular stickers made from your own images**.
 
 ## Fastest path: use Telegram's built-in editor
 
@@ -60,4 +60,4 @@ Do not put Telegram provider `file_id` values in model prompts or public configu
 - **There is no + button:** update Telegram or use the `@Stickers` Mini App.
 - **The bot receives a photo instead:** send the finished sticker from the sticker panel, not the original image attachment.
 - **Telemood does not catalog it:** v0.1 accepts regular static, animated, and video stickers. Masks and `custom_emoji` are rejected, and the host must route incoming sticker updates.
-- **The model cannot understand the picture:** the host must attach a thumbnail or media reference. Without one, Telemood deliberately exposes metadata only.
+- **The model cannot understand the picture:** the host must use a vision-capable model directly, or route the sticker image to a vision model and pass its text description to the primary model. Without either path, Telemood deliberately exposes metadata only.

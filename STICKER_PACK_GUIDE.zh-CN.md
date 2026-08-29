@@ -4,7 +4,7 @@
 
 这是使用 Telemood 贴纸闭环前的用户侧准备。贴纸包由 Telegram 创建和管理；用户把包里的一张贴纸发给已经接入 Telemood 的 Bot 后，Telemood 才开始处理。
 
-本指南只讲**用自己的图片制作普通贴纸（regular sticker）**，不包括 mask sticker 或 custom emoji。
+本指南只讲**用自己的图片制作普通贴纸（regular sticker）**。
 
 ## 最快的方法：使用 Telegram 内置编辑器
 
@@ -60,4 +60,4 @@ Telemood 不负责上传图片、创建或修改贴纸包，也不会接收你�
 - **贴纸面板里没有 +：** 更新 Telegram，或者改用 `@Stickers` Mini App。
 - **Bot 收到的是图片：** 请从贴纸面板发送制作完成的贴纸，不要发送原始图片附件。
 - **Telemood 没有收藏：** v0.1 接受普通 static、animated 和 video sticker；mask 与 `custom_emoji` 会被拒绝，而且宿主必须路由入站贴纸更新。
-- **模型看不懂图片内容：** 宿主需要附加缩略图或媒体引用；没有这些引用时，Telemood 会刻意只提供元数据。
+- **模型看不懂图片内容：** 宿主需要直接使用视觉模型，或者把贴纸图片路由给视觉模型，再把文字描述交给主模型理解；两种路径都没有时，Telemood 会刻意只提供元数据。
