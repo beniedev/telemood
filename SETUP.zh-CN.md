@@ -15,7 +15,7 @@
 
 不要读取或复制 bot token，不要新建第二个 client 或 update loop。
 
-当前预发行元数据：
+当前发行元数据：
 
     distribution: telemood
     import: telemood
@@ -54,7 +54,7 @@
     python -m pip install .
     python -c "import telemood; print(telemood.__version__)"
 
-预期版本为 `0.1.0rc1`。运行时依赖为空，但构建包时仍可能使用常规 Python build requirements。优先正常安装，不要把检出目录手工塞进 `sys.path`。
+预期版本为 `0.1.0`。运行时依赖为空，但构建包时仍可能使用常规 Python build requirements。优先正常安装，不要把检出目录手工塞进 `sys.path`。
 
 内置入站规范化目前只覆盖普通贴纸消息、reaction change/count update，以及包含消息对象的 callback。本版本的通用文本消息、Telegram Business 消息与 inline-mode callback 必须由宿主自行路由和规范化。
 
@@ -160,13 +160,14 @@ facade 完整且不绑定 provider：四个宿主 callable 都接收 keyword arg
 
 Sticker sequence 严格按顺序发送，遇到首个 non-`VERIFIED` 即停止。只有最后一个已尝试 receipt 为 non-`VERIFIED` 时，较短的 receipt 序列才是合法提前停止；全 `VERIFIED` 却缺 receipt、receipt 超量或 non-verified 后继续发送都属于协议错误。
 
-## 6. 入站 regular sticker
+## 6. 用户自制 regular sticker 闭环
 
-内置 normalizer 接收 Telegram Bot API update mapping。宿主提供 bot namespace 与可选的逻辑媒体引用；Telemood 不下载媒体，也不接收 token。
+内置 normalizer 接收 Telegram Bot API update mapping。宿主使用已有 Telegram client 获取需要的视觉媒体，再提供 bot namespace 与可选的逻辑媒体引用；Telemood 不下载媒体，也不接收 token。
 
     from telemood import (
         SQLiteStickerCatalog,
         ingest_incoming_sticker,
+        list_sticker_model_views,
         normalize_incoming_sticker,
     )
 
@@ -178,10 +179,18 @@ Sticker sequence 严格按顺序发送，遇到首个 non-`VERIFIED` 即停止�
         media_ref=host_media_ref,
     )
     model_event = ingest_incoming_sticker(event, catalog)
+    available_stickers = list_sticker_model_views(
+        catalog,
+        trusted_bot_namespace,
+    )
 
 `model_event.sticker` 包含 opaque catalog ID、规范化文本与可选逻辑媒体引用；event 还提供 sender kind、target role、thread presence 与发生时间，但不暴露可复用的 provider `file_id`。没有媒体引用时，`model_event.sticker.text` 会明确说明未附加图像；模型只看到了 metadata。
 
-v0.1 支持 static、animated、video 三种 format 的 regular sticker；mask 与 custom_emoji type 会被拒绝，不会进入 catalog。
+交给模型的是 `model_event`；需要从已收藏贴纸中选择时，再提供 `available_stickers`。不要把 `catalog.list(...)` 的可信存储行直接交给模型，因为其中包含可复用的 provider ID。回发时，模型把安全的 `catalog_id` 放入第 4 节的 catalog sticker action。绑定阶段只会在可信 `bot_namespace` 内解析该 ID；未知 ID 或来自其他 namespace 的 ID 会 fail closed。真实发送仍由宿主已有 adapter 执行，并返回 delivery receipt。
+
+Telemood 不创建或修改 sticker pack。用户通过 Telegram 内置 Sticker Editor 或 `@Stickers` Mini App 创建和维护 regular pack，再向宿主发送一张贴纸以便收藏。Telegram 端的操作步骤见[用户指南](STICKER_PACK_GUIDE.zh-CN.md)，最新格式要求以 [Telegram 官方贴纸指南](https://core.telegram.org/stickers)为准。公开配置或模型计划不得包含私人包名、素材、mood 或 provider `file_id`。
+
+v0.1 支持 static、animated、video 三种 format 的 regular sticker；mask 与 `custom_emoji` type 会被拒绝，不会进入 catalog。
 
 ## 7. 入站与出站 reaction
 

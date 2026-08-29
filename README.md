@@ -16,6 +16,21 @@ Telemood is not another bot framework or Telegram client. It does not own your b
 
 Telemood preserves the planned order and records the result of each action.
 
+## Personal sticker round trip
+
+Need a pack first? [Create a regular sticker pack from your own images](STICKER_PACK_GUIDE.md), then send one of its stickers to your bot.
+
+When a user sends a sticker from a regular sticker pack, the host can attach a
+thumbnail or media reference for its vision-capable model. Telemood remembers
+the sticker under an opaque, bot-scoped catalog ID. The model can later choose
+that ID in a reply plan, and the host's existing Telegram client sends the
+original sticker back.
+
+Telegram `file_id` values stay inside the trusted catalog and transport
+boundary. Without visual media, Telemood explicitly reports that the model saw
+metadata only. Mask stickers and Telegram `custom_emoji` are not part of this
+release.
+
 ## The core idea
 
 ```text
@@ -40,7 +55,7 @@ The existing bot or runtime (the **host**) still decides where and through which
 
 - Text bubbles, with conservative splitting for long text
 - Ordinary emoji reactions on the triggering message
-- Cataloged static, animated, and video regular stickers
+- Understand and remember regular stickers sent by users, then send them back by safe catalog ID
 - Choice buttons within Telegram's 64-byte `callback_data` limit
 
 ### Execute safely
@@ -74,7 +89,7 @@ After authorization, follow SETUP.md and adapt the existing client.
 
 ## Status and verification
 
-Telemood `0.1.0rc1` is an early pre-release. Its core contracts and adapters have offline test coverage, but it has not been tested against every Telegram SDK or production host. APIs may still change.
+Telemood `0.1.0` is the first public release. Its core contracts and adapters have offline test coverage, but it has not been tested against every Telegram SDK or production host. APIs may still change within the `0.x` series.
 
 Built-in inbound normalization covers regular sticker messages, reaction change/count updates, and message-backed callbacks. Generic text messages, Telegram Business messages, and inline-mode callbacks remain host-routed. Reaction updates require explicit subscription and may require administrator permission.
 
