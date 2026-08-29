@@ -18,6 +18,8 @@ Telemood preserves the planned order and records the result of each action.
 
 ## Personal sticker round trip
 
+Need a pack first? [Create a regular sticker pack from your own images](STICKER_PACK_GUIDE.md), then send one of its stickers to your bot.
+
 When a user sends a sticker from a regular sticker pack, the host can attach a
 thumbnail or media reference for its vision-capable model. Telemood remembers
 the sticker under an opaque, bot-scoped catalog ID. The model can later choose

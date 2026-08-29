@@ -18,6 +18,8 @@ Telemood 保留计划中的顺序，并记录每个动作的执行结果。
 
 ## 用户自制贴纸闭环
 
+还没有自己的贴纸包？先按[用自己的图片创建普通贴纸包](STICKER_PACK_GUIDE.zh-CN.md)完成 Telegram 端操作，再把其中一张贴纸发给你的 Bot。
+
 用户发送 regular sticker pack 中的贴纸时，宿主可以为支持视觉的模型附加缩略图或媒体引用。Telemood 用一个不透明、按 Bot 隔离的目录 ID 收藏这张贴纸。模型以后可以在回复计划中选择该 ID，再由宿主已有的 Telegram 客户端发回原贴纸。
 
 Telegram `file_id` 始终留在可信目录与传输边界内。没有视觉媒体时，Telemood 会明确说明模型只看到了元数据。本版本不支持 mask sticker 或 Telegram `custom_emoji`。

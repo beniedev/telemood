@@ -188,7 +188,7 @@ Sticker sequence 严格按顺序发送，遇到首个 non-`VERIFIED` 即停止�
 
 交给模型的是 `model_event`；需要从已收藏贴纸中选择时，再提供 `available_stickers`。不要把 `catalog.list(...)` 的可信存储行直接交给模型，因为其中包含可复用的 provider ID。回发时，模型把安全的 `catalog_id` 放入第 4 节的 catalog sticker action。绑定阶段只会在可信 `bot_namespace` 内解析该 ID；未知 ID 或来自其他 namespace 的 ID 会 fail closed。真实发送仍由宿主已有 adapter 执行，并返回 delivery receipt。
 
-Telemood 不创建或修改 sticker pack。用户通过 Telegram 内置 Sticker Editor 或 `@Stickers` Mini App 创建和维护 regular pack，再向宿主发送一张贴纸以便收藏。操作方式见 [Telegram 官方贴纸指南](https://core.telegram.org/stickers)。公开配置或模型计划不得包含私人包名、素材、mood 或 provider `file_id`。
+Telemood 不创建或修改 sticker pack。用户通过 Telegram 内置 Sticker Editor 或 `@Stickers` Mini App 创建和维护 regular pack，再向宿主发送一张贴纸以便收藏。Telegram 端的操作步骤见[用户指南](STICKER_PACK_GUIDE.zh-CN.md)，最新格式要求以 [Telegram 官方贴纸指南](https://core.telegram.org/stickers)为准。公开配置或模型计划不得包含私人包名、素材、mood 或 provider `file_id`。
 
 v0.1 支持 static、animated、video 三种 format 的 regular sticker；mask 与 `custom_emoji` type 会被拒绝，不会进入 catalog。
 

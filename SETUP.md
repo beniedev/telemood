@@ -227,10 +227,11 @@ receipt.
 
 Telemood does not create or modify sticker packs. A user creates and maintains
 their regular pack with Telegram's in-app Sticker Editor or the `@Stickers`
-Mini App, then sends a sticker to the host so it can be cataloged. See
-[Telegram's sticker guide](https://core.telegram.org/stickers). Do not place
-pack names, artwork, private moods, or provider `file_id` values in public
-configuration or model plans.
+Mini App, then sends a sticker to the host so it can be cataloged. See the
+[user guide](STICKER_PACK_GUIDE.md) for that Telegram-side setup and
+[Telegram's official sticker guide](https://core.telegram.org/stickers) for
+current format details. Do not place pack names, artwork, private moods, or
+provider `file_id` values in public configuration or model plans.
 
 v0.1 accepts regular stickers in static, animated, or video format. Mask and
 `custom_emoji` sticker types are rejected and are not cataloged.
