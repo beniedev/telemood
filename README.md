@@ -31,6 +31,35 @@ boundary. Without visual media, Telemood explicitly reports that the model saw
 metadata only. Mask stickers and Telegram `custom_emoji` are not part of this
 release.
 
+## Inbound coalescing (optional host policy)
+
+A user often splits one thought across several consecutive messages, or sends
+a sticker and then the text that goes with it. `telemood.coalesce` provides a
+pure policy surface for merging those consecutive inbound parts into one
+logical turn. The host still owns per-conversation buffers, timers, and turn
+cancellation; the package reads no clock and performs no I/O.
+
+Defaults: flush after 2.5 s of quiet following a text part, 4.5 s following a
+sticker part (a sticker is often followed by text), and never later than
+8.0 s after the first part of the batch.
+
+```text
+coalescer = InboundCoalescer(CoalescePolicy())  # one per conversation
+guard = RestartGuard(read_only_tools=("search", "read_page"))  # new one per turn
+
+on inbound part:
+    deadline = coalescer.add(InboundPart(kind, rendered_text, monotonic()))
+    schedule the flush timer at deadline, replacing any pending one
+
+on flush timer:
+    merged = render_inbound(coalescer.drain())
+    if a turn is still running:
+        if guard.can_restart: cancel it and re-run with its input + "\n" + merged
+        else: queue merged as a follow-up
+    else:
+        start a turn with merged
+```
+
 ## The core idea
 
 ```text

@@ -278,6 +278,11 @@ Callback store 仍是到期安全判断的唯一权威：即使界面清理尚�
 `CallbackToken(value)` 即可兼容；只有同时填写可选的 `expires_at` 元数据时，
 receipt 才会提供对应到期时间，否则为 `None`。
 
+需要把连续入站消息合并为一个轮次的宿主，可以使用可选的
+`telemood.coalesce` 策略（`InboundCoalescer`、`CoalescePolicy`、
+`render_inbound`、`RestartGuard`）。它只计算冲刷截止时间和轮次是否可重启；
+缓冲、定时器和轮次取消仍由宿主持有。参见 README「入站合并（可选宿主策略）」。
+
 ## 9. 最小离线验证
 
 安装前先在仓库检出中运行，修改后再重复：
