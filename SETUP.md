@@ -332,6 +332,12 @@ implementations remain compatible when they return `CallbackToken(value)`;
 their receipt expiry is `None` unless they also populate the token's optional
 `expires_at` metadata.
 
+Hosts that merge consecutive inbound messages into one turn can use the
+optional `telemood.coalesce` policy (`InboundCoalescer`, `CoalescePolicy`,
+`render_inbound`, `RestartGuard`). It only computes flush deadlines and
+restart eligibility; buffering, timers, and turn cancellation stay
+host-owned. See README "Inbound coalescing (optional host policy)".
+
 ## 9. Minimum offline verification
 
 Run these from the checkout before installation and repeat them after changes:

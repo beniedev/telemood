@@ -24,6 +24,32 @@ Telemood 保留计划中的顺序，并记录每个动作的执行结果。
 
 Telegram `file_id` 始终留在可信目录与传输边界内。没有视觉媒体时，Telemood 会明确说明模型只看到了元数据。本版本不支持 mask sticker 或 Telegram `custom_emoji`。
 
+## 入站合并（可选宿主策略）
+
+用户经常把一句话拆成几条连续消息发送，或者先发一张贴纸、再补一段文字。
+`telemood.coalesce` 提供一个纯策略接口，把这些连续的入站部分合并为一个逻辑轮次。
+宿主仍然持有按会话划分的缓冲、定时器和轮次取消权；本包不读取时钟，也不做任何 I/O。
+
+默认值：最后一个文本部分之后静默 2.5 秒冲刷；最后一个贴纸部分之后 4.5 秒
+（贴纸后面常常跟着文字）；无论如何不晚于批次第一个部分之后 8.0 秒。
+
+```text
+coalescer = InboundCoalescer(CoalescePolicy())  # 每个会话一个
+guard = RestartGuard(read_only_tools=("search", "read_page"))  # 每个轮次新建一个
+
+收到入站部分时：
+    deadline = coalescer.add(InboundPart(kind, rendered_text, monotonic()))
+    在 deadline 调度冲刷定时器，替换尚未触发的旧定时器
+
+定时器触发时：
+    merged = render_inbound(coalescer.drain())
+    如果已有轮次仍在运行：
+        若 guard.can_restart：取消该轮次，用「该轮次原输入 + 换行 + merged」重新执行
+        否则：把 merged 排队为后续轮次
+    否则：
+        用 merged 开启新轮次
+```
+
 ## 核心思路
 
 ```text

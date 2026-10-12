@@ -6,6 +6,14 @@ from .callbacks import (
     CallbackStore,
     SQLiteCallbackStore,
 )
+from .coalesce import (
+    CoalescePolicy,
+    InboundCoalescer,
+    InboundPart,
+    RestartGuard,
+    can_restart,
+    render_inbound,
+)
 from .conformance import AdapterCheckResult, MethodCheck, check_adapter
 from .adapters import (
     AsyncInjectedTelegramAdapter,
@@ -102,8 +110,11 @@ __all__ = [
     "ChoiceOption",
     "ChoicesRequest",
     "ChoicesPlanAction",
+    "CoalescePolicy",
     "CompletionMode",
     "DeliveryStatus",
+    "InboundCoalescer",
+    "InboundPart",
     "IncomingReactionChange",
     "IncomingReactionCount",
     "IncomingSticker",
@@ -130,6 +141,7 @@ __all__ = [
     "ReactionType",
     "ReactionValue",
     "RegularSticker",
+    "RestartGuard",
     "RichReply",
     "RichReplyReceipt",
     "SQLiteCallbackStore",
@@ -148,6 +160,7 @@ __all__ = [
     "TransportReceipt",
     "action_plan_to_reply",
     "bind_interaction_plan",
+    "can_restart",
     "check_adapter",
     "ingest_incoming_sticker",
     "list_sticker_model_views",
@@ -156,6 +169,7 @@ __all__ = [
     "normalize_incoming_reaction_count",
     "normalize_incoming_sticker",
     "parse_interaction_plan",
+    "render_inbound",
     "split_semantic_bubbles",
     "sticker_catalog_id",
 ]
